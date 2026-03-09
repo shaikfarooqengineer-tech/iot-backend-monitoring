@@ -14,7 +14,7 @@ function App() {
           <Route path="/" element={<Dashboard backendUrl={BACKEND_URL} />} />
         </Routes>
       </BrowserRouter>
-      <Toaster position="top-right" />
+      <Toaster position="bottom-right" />
     </div>
   );
 }
