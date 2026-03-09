@@ -1,0 +1,190 @@
+{
+  "identity": {
+    "name": "E1",
+    "role": "Anti-AI Creative Designer",
+    "principles": [
+      "Fusion over Imitation: Mix disparate references.",
+      "Emotion First: Every design decision maps to a feeling.",
+      "Content is King: Tell a story with directed flow.",
+      "Zoom In: Bold focus on essential details.",
+      "Negative Space: Value the empty areas.",
+      "Contrast: Use light vs. dark, rough vs. smooth."
+    ],
+    "anti_patterns": [
+      "Purple/Teal usage for CTA",
+      "Inter everywhere (Visual Monotony)",
+      "Center-Everything Disease",
+      "Gradient Overload (>20%)"
+    ]
+  },
+  "context": {
+    "app_name": "VitalSync",
+    "type": "Health Monitoring Dashboard",
+    "domain": "Healthcare / Medical",
+    "target_audience": "Healthcare providers, caregivers, medical staff",
+    "tone": "Trustworthy, Clean, Professional, Empathetic",
+    "theme_preference": "light"
+  },
+  "design_system": {
+    "typography": {
+      "headings": {
+        "family": "Manrope",
+        "weights": ["400", "600", "700", "800"],
+        "usage": "Use for all section titles, widget headers, and major metrics."
+      },
+      "body": {
+        "family": "Inter",
+        "weights": ["400", "500"],
+        "usage": "Use for labels, descriptions, and supporting text."
+      },
+      "mono": {
+        "family": "JetBrains Mono",
+        "weights": ["400", "500"],
+        "usage": "Use for raw data values, timestamps, and IDs."
+      }
+    },
+    "colors": {
+      "palette_name": "Clinical Clarity",
+      "background": {
+        "default": "#F8FAFC",
+        "paper": "#FFFFFF",
+        "subtle": "#F1F5F9"
+      },
+      "primary": {
+        "main": "#0F172A",
+        "light": "#334155",
+        "dark": "#020617",
+        "contrast": "#FFFFFF"
+      },
+      "accent": {
+        "main": "#3B82F6",
+        "hover": "#2563EB",
+        "subtle": "#EFF6FF"
+      },
+      "functional": {
+        "success": "#10B981",
+        "warning": "#F59E0B",
+        "error": "#EF4444",
+        "info": "#3B82F6",
+        "neutral": "#64748B"
+      },
+      "border": {
+        "default": "#E2E8F0",
+        "subtle": "#F1F5F9"
+      },
+      "text": {
+        "primary": "#0F172A",
+        "secondary": "#64748B",
+        "tertiary": "#94A3B8",
+        "disabled": "#CBD5E1"
+      }
+    },
+    "spacing": {
+      "scale": "tailwind",
+      "base_unit": "4px",
+      "container_padding": "p-6 md:p-8 lg:p-10",
+      "grid_gap": "gap-4 md:gap-6",
+      "component_padding": "p-4 or p-6"
+    },
+    "radius": {
+      "default": "rounded-xl",
+      "card": "rounded-2xl",
+      "button": "rounded-lg",
+      "input": "rounded-md"
+    },
+    "shadows": {
+      "card": "shadow-sm hover:shadow-md transition-shadow duration-200",
+      "dropdown": "shadow-lg",
+      "focus": "ring-2 ring-offset-2 ring-blue-500"
+    }
+  },
+  "layout_strategy": {
+    "grid_system": "Bento Grid (Mode B: High Density)",
+    "rules": [
+      "Mobile-First: Start with grid-cols-1.",
+      "Density: Every pixel must be utilized for data visibility.",
+      "Alignment: Use 'items-stretch' to ensure widgets fill vertical space.",
+      "Hierarchy: Critical vitals (Heart, Breath) top-left or top-center."
+    ],
+    "structure": {
+      "header": "Sticky top, low profile, contains patient selector and global status.",
+      "main": "Grid layout with mixed widget sizes.",
+      "widgets": {
+        "vitals_row": "col-span-full grid grid-cols-2 md:grid-cols-4 gap-4",
+        "room_status": "col-span-1 md:col-span-2 row-span-2 (Tall card)",
+        "trends": "col-span-1 md:col-span-2 row-span-1 (Wide card)",
+        "alerts": "col-span-1 md:col-span-1 row-span-2 (Tall list)",
+        "device_status": "col-span-1 row-span-1 (Standard card)"
+      }
+    }
+  },
+  "components": {
+    "library": "shadcn/ui",
+    "customization_rules": [
+      "Remove rigid borders where possible, use background distinction.",
+      "Use 'sonner' for toasts.",
+      "Customize 'Card' to be lighter and cleaner.",
+      "Use 'recharts' for all data visualization."
+    ],
+    "specific_components": {
+      "VitalsCard": {
+        "description": "Displays a single vital metric with a large value, unit, and trend indicator.",
+        "style": "bg-white p-6 rounded-2xl shadow-sm border border-slate-100 flex flex-col justify-between"
+      },
+      "TrendChart": {
+        "description": "Line chart showing historical data for a metric.",
+        "style": "Minimalist axes, smooth curves (monotone), gradient fill below line."
+      },
+      "AlertList": {
+        "description": "Scrollable list of recent alerts.",
+        "style": "Items with color-coded left border or icon to indicate severity."
+      },
+      "RoomStatus": {
+        "description": "Visual representation of the room environment.",
+        "style": "Use icons and progress bars for temperature, light, etc."
+      }
+    }
+  },
+  "assets": {
+    "icons": {
+      "library": "lucide-react",
+      "style": "Stroke width 1.5 or 2, consistent size (w-5 h-5 for UI, w-8 h-8 for features)."
+    },
+    "images": [
+      {
+        "category": "patient_profile",
+        "url": "https://images.unsplash.com/photo-1758691461884-ff702418afde?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NzR8MHwxfHNlYXJjaHwxfHxlbGRlcmx5JTIwcGF0aWVudCUyMHBvcnRyYWl0fGVufDB8fHx8MTc3MzA1NDY1MXww&ixlib=rb-4.1.0&q=85",
+        "description": "Portrait of an elderly patient for the header profile."
+      }
+    ]
+  },
+  "motion": {
+    "philosophy": "Functional and calming. No jarring movements.",
+    "transitions": "transition-all duration-300 ease-in-out",
+    "data_updates": "Smooth number counting or gentle flash on update.",
+    "loading": "Skeleton loaders matching the widget shapes."
+  },
+  "accessibility": {
+    "contrast": "Ensure text meets WCAG AA standards (4.5:1).",
+    "focus": "Visible focus rings on all interactive elements.",
+    "aria": "Use aria-labels for icon-only buttons and charts.",
+    "reduced_motion": "Respect user preference for reduced motion."
+  },
+  "universal_guidelines": [
+    "Do not center-align the main app container.",
+    "Avoid gradients for backgrounds, use solid colors or subtle patterns.",
+    "Use z-index to create depth.",
+    "Add 'data-testid' to all interactive elements.",
+    "Use 'sonner' for notifications.",
+    "Do not use generic 'Inter' for headings - strictly use 'Manrope'.",
+    "Never use the forbidden color #1B93A4 (Teal)."
+  ],
+  "instructions_to_main_agent": [
+    "1. Install necessary dependencies: 'npm install recharts lucide-react clsx tailwind-merge'.",
+    "2. Setup the 'Manrope' and 'JetBrains Mono' fonts via Google Fonts import in index.css.",
+    "3. Create a 'components/dashboard' directory for dashboard-specific widgets.",
+    "4. Implement the 'Bento Grid' layout in the main dashboard page.",
+    "5. Use the provided image URL for the patient profile.",
+    "6. Mock real-time data updates using `useEffect` and `setInterval`."
+  ]
+}
