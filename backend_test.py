@@ -7,7 +7,7 @@ import threading
 from datetime import datetime
 
 class HealthDashboardTester:
-    def __init__(self, base_url="https://cloud-sync-page.preview.emergentagent.com"):
+    def __init__(self, base_url="http://localhost:8000"):
         self.base_url = base_url
         self.tests_run = 0
         self.tests_passed = 0
@@ -115,7 +115,7 @@ class HealthDashboardTester:
         """Test WebSocket real-time updates"""
         print(f"\n🔗 Testing WebSocket connection...")
         
-        ws_url = self.base_url.replace('https://', 'wss://') + '/api/ws'
+        ws_url = self.base_url.replace('http://', 'ws://').replace('https://', 'ws://') + '/api/ws'
         print(f"WebSocket URL: {ws_url}")
         
         try:
