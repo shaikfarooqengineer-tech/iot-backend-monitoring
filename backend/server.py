@@ -1,4 +1,8 @@
-from fastapi import FastAPI, APIRouter, WebSocket, WebSocketDisconnect
+# Change this line at the top:
+from fastapi import FastAPI, APIRouter, WebSocket, WebSocketDisconnect, Request, Response, HTTPException
+from datetime import datetime, timezone, timedelta
+import bcrypt
+import httpx
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -8,10 +12,10 @@ from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional
 import uuid
-from datetime import datetime, timezone
 import asyncio
 import random
 import json
+
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -25,12 +29,15 @@ logger = logging.getLogger(__name__)
 
 # MongoDB connection
 try:
-    mongo_url = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
+    mongo_url = os.environ.get('MONGO_URL')
     db_name = os.environ.get('DB_NAME')
+
+    if not mongo_url or not db_name:
+        raise ValueError("MONGO_URL and DB_NAME must be set in .env file")
+
     client = AsyncIOMotorClient(mongo_url, serverSelectionTimeoutMS=2000)
     db = client[db_name]
-    # Simple check to see if we can connect
-    logger.info(f"Attempting to connect to MongoDB at {mongo_url}")
+    logger.info("Attempting to connect to MongoDB...")
 except Exception as e:
     logger.warning(f"Failed to connect to MongoDB: {e}. Running with mock functionality.")
     db = None
@@ -64,7 +71,8 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-# Define Models
+# ─── Health Monitoring Models ─────────────────────────────────────────────────
+
 class Patient(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -127,7 +135,149 @@ class DashboardData(BaseModel):
     respiration_history: List[dict]
     timestamp: str
 
-# Generate realistic mock data
+# ─── Auth / User Models ────────────────────────────────────────────────────────
+
+class User(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    user_id: str
+    username: Optional[str] = None
+    email: str
+    name: str
+    picture: Optional[str] = None
+    role: str = "employee"  # admin or employee
+    created_at: datetime
+
+class UserCreate(BaseModel):
+    username: str
+    password: str
+    email: str
+    name: str
+    role: str = "employee"
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class AdminRegister(BaseModel):
+    username: str
+    password: str
+    email: str
+    name: str
+    company_name: str
+
+class SessionData(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    user_id: str
+    session_token: str
+    expires_at: datetime
+    created_at: datetime
+
+class PasswordResetRequest(BaseModel):
+    username: str
+
+class PasswordResetConfirm(BaseModel):
+    token: str
+    new_password: str
+
+# ─── Employee Models ───────────────────────────────────────────────────────────
+
+class Employee(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    employee_id: str
+    name: str
+    email: str
+    phone: Optional[str] = None
+    department: Optional[str] = None
+    position: Optional[str] = None
+    join_date: str
+    status: str = "active"  # active, on_leave, inactive
+    created_at: datetime
+
+class EmployeeCreate(BaseModel):
+    name: str
+    email: str
+    phone: Optional[str] = None
+    department: Optional[str] = None
+    position: Optional[str] = None
+    join_date: str
+
+class EmployeeUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    department: Optional[str] = None
+    position: Optional[str] = None
+    join_date: Optional[str] = None
+    status: Optional[str] = None
+
+
+
+# # ─── Client Models ─────────────────────────────────────────────────────────────
+
+# class Client(BaseModel):
+#     model_config = ConfigDict(extra="ignore")
+#     client_id: str
+#     company_name: str
+#     contact_person: str
+#     email: str
+#     phone: Optional[str] = None
+#     address: Optional[str] = None
+#     status: str = "active"  # active, inactive
+#     created_at: datetime
+
+# class ClientCreate(BaseModel):
+#     company_name: str
+#     contact_person: str
+#     email: str
+#     phone: Optional[str] = None
+#     address: Optional[str] = None
+
+# ─── Activity & Notification Models ───────────────────────────────────────────
+
+class Activity(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    activity_id: str
+    user_id: str
+    user_name: str
+    action: str  # created, updated, deleted, completed
+    entity_type: str  # project, task, client, meeting, document, employee
+    entity_name: str
+    description: str
+    created_at: datetime
+
+class Notification(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    notification_id: str
+    user_id: str
+    title: str
+    message: str
+    type: str  # task_assigned, meeting_reminder, project_update
+    is_read: bool = False
+    created_at: datetime
+
+
+# ─── Knowledge Base Models ─────────────────────────────────────────────────────
+
+class KnowledgeArticle(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    article_id: str
+    title: str
+    content: str
+    category: str  # technical, hr, process, general
+    tags: List[str] = []
+    author_id: str
+    author_name: str
+    created_at: datetime
+    updated_at: datetime
+
+class KnowledgeArticleCreate(BaseModel):
+    title: str
+    content: str
+    category: str
+    tags: List[str] = []
+
+# ─── Mock Data Generators ──────────────────────────────────────────────────────
+
 def generate_vitals():
     heart_rate = random.randint(65, 85)
     respiration_rate = random.randint(14, 20)
@@ -208,7 +358,7 @@ def generate_chart_data():
     now = datetime.now(timezone.utc)
     heart_rate_history = []
     respiration_history = []
-    
+
     for i in range(24):
         hour = (now.hour - 23 + i) % 24
         time_label = f"{hour:02d}:00"
@@ -220,12 +370,12 @@ def generate_chart_data():
             "time": time_label,
             "value": random.randint(10, 24)
         })
-    
+
     return heart_rate_history, respiration_history
 
 def generate_dashboard_data():
     heart_rate_history, respiration_history = generate_chart_data()
-    
+
     return DashboardData(
         patient=Patient(
             id="patient-001",
@@ -246,7 +396,562 @@ def generate_dashboard_data():
         timestamp=datetime.now(timezone.utc).isoformat()
     )
 
-# REST API endpoints
+
+#─────────────────────────────────────────── Helper function to hash password───────────────────────────────────────────
+def hash_password(password: str) -> str:
+    salt = bcrypt.gensalt()
+    return bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
+
+
+# Helper function to verify password
+def verify_password(password: str, hashed: str) -> bool:
+    return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+
+
+# Helper function to get user from token
+async def get_current_user(request: Request) -> User:
+    # Check cookie first, then Authorization header as fallback
+    session_token = request.cookies.get("session_token")
+    if not session_token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            session_token = auth_header.replace("Bearer ", "")
+    
+    if not session_token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    # Find session
+    session_doc = await db.user_sessions.find_one(
+        {"session_token": session_token},
+        {"_id": 0}
+    )
+    
+    if not session_doc:
+        raise HTTPException(status_code=401, detail="Invalid session")
+    
+    # Check expiry
+    expires_at = session_doc["expires_at"]
+    if isinstance(expires_at, str):
+        expires_at = datetime.fromisoformat(expires_at)
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    
+    if expires_at < datetime.now(timezone.utc):
+        raise HTTPException(status_code=401, detail="Session expired")
+    
+    # Get user
+    user_doc = await db.users.find_one(
+        {"user_id": session_doc["user_id"]},
+        {"_id": 0}
+    )
+    
+    if not user_doc:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Convert datetime if needed
+    if isinstance(user_doc['created_at'], str):
+        user_doc['created_at'] = datetime.fromisoformat(user_doc['created_at'])
+    
+    return User(**user_doc)
+
+async def log_activity(user_id: str, user_name: str, action: str, entity_type: str, entity_name: str, description: str):
+    activity_id = f"act_{uuid.uuid4().hex[:12]}"
+    await db.activities.insert_one({
+        "activity_id": activity_id,
+        "user_id": user_id,
+        "user_name": user_name,
+        "action": action,
+        "entity_type": entity_type,
+        "entity_name": entity_name,
+        "description": description,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    })
+
+async def send_email(to_email: str, subject: str, html_content: str):
+    logging.warning("Email sending not configured")
+    return None
+
+
+#──────────────────────────────────────── Email templates───────────────────────────────────────────
+def get_password_reset_email(user_name: str, reset_token: str):
+    return f"""
+    <html>
+    <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+        <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+            <h2 style="color: #4F46E5;">Password Reset Request</h2>
+            <p>Hello {user_name},</p>
+            <p>You requested a password reset for your OLT Innovations account.</p>
+            <p>Your reset token is:</p>
+            <div style="background: #F3F4F6; padding: 15px; border-radius: 8px; margin: 20px 0;">
+                <code style="font-size: 14px; word-break: break-all;">{reset_token}</code>
+            </div>
+            <p>This token expires in <strong>1 hour</strong>.</p>
+            <p>To reset your password:</p>
+            <ol>
+                <li>Go to the login page</li>
+                <li>Click "Forgot Password?"</li>
+                <li>Click "Already have a token? Enter it here"</li>
+                <li>Enter the token above and your new password</li>
+            </ol>
+            <p>If you didn't request this reset, please ignore this email.</p>
+            <hr style="border: none; border-top: 1px solid #E5E7EB; margin: 20px 0;">
+            <p style="color: #6B7280; font-size: 12px;">OLT Innovations - Operations Management System</p>
+        </div>
+    </body>
+    </html>
+    """
+
+
+# ─────────────────────────────────────────── Auth Routes/register-admin ───────────────────────────────────────────
+@api_router.post("/auth/register-admin")
+async def register_admin(admin_data: AdminRegister, response: Response):
+    # Check if any admin exists
+    existing_admin = await db.users.find_one({"role": "admin"}, {"_id": 0})
+    if existing_admin:
+        raise HTTPException(status_code=400, detail="Admin already exists")
+    
+    # Check if username exists
+    existing_user = await db.users.find_one({"username": admin_data.username}, {"_id": 0})
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Username already taken")
+    
+    # Create admin user
+    user_id = f"user_{uuid.uuid4().hex[:12]}"
+    now = datetime.now(timezone.utc)
+    
+    user_doc = {
+        "user_id": user_id,
+        "username": admin_data.username,
+        "password": hash_password(admin_data.password),
+        "email": admin_data.email,
+        "name": admin_data.name,
+        "picture": None,
+        "role": "admin",
+        "created_at": now.isoformat()
+    }
+    
+    await db.users.insert_one(user_doc)
+    
+    # Create session
+    session_token = f"session_{uuid.uuid4().hex}"
+    await db.user_sessions.insert_one({
+        "user_id": user_id,
+        "session_token": session_token,
+        "expires_at": now + timedelta(days=7),
+        "created_at": now
+    })
+    
+    # Set cookie
+    response.set_cookie(
+        key="session_token",
+        value=session_token,
+        httponly=True,
+        secure=True,
+        samesite="none",
+        path="/",
+        max_age=7 * 24 * 60 * 60
+    )
+    
+    # Store company name
+    await db.company_settings.insert_one({
+        "company_name": admin_data.company_name,
+        "created_at": now.isoformat()
+    })
+    
+    user_doc['created_at'] = now
+    del user_doc['password']
+    return User(**user_doc)
+
+
+# ─────────────────────────────────────────── Auth Routes/Login ───────────────────────────────────────────
+@api_router.post("/auth/login")
+async def login(login_data: LoginRequest, response: Response):
+    # Find user by username OR email
+    user_doc = await db.users.find_one({"username": login_data.username}, {"_id": 0})
+    
+    # If not found by username, try email
+    if not user_doc:
+        user_doc = await db.users.find_one({"email": login_data.username}, {"_id": 0})
+    
+    if not user_doc:
+        raise HTTPException(status_code=401, detail="Invalid email/username or password")
+    
+    # Verify password
+    if not verify_password(login_data.password, user_doc["password"]):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    
+    # Create session
+    session_token = f"session_{uuid.uuid4().hex}"
+    now = datetime.now(timezone.utc)
+    
+    await db.user_sessions.insert_one({
+        "user_id": user_doc["user_id"],
+        "session_token": session_token,
+        "expires_at": now + timedelta(days=7),
+        "created_at": now
+    })
+    
+    # Set cookie
+    response.set_cookie(
+        key="session_token",
+        value=session_token,
+        httponly=True,
+        secure=True,
+        samesite="none",
+        path="/",
+        max_age=7 * 24 * 60 * 60
+    )
+    
+    if isinstance(user_doc['created_at'], str):
+        user_doc['created_at'] = datetime.fromisoformat(user_doc['created_at'])
+    
+    del user_doc['password']
+    user_response = User(**user_doc).model_dump()
+    user_response['session_token'] = session_token
+    return user_response
+# ─────────────────────────────────────────── Auth Routes/Create User ───────────────────────────────────────────
+@api_router.post("/auth/create-user")
+async def create_team_member(user_data: UserCreate, request: Request):
+    current_user = await get_current_user(request)
+    
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Only admin can create users")
+    
+    # Check if username exists
+    existing_user = await db.users.find_one({"username": user_data.username}, {"_id": 0})
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Username already taken")
+    
+    # Create user
+    user_id = f"user_{uuid.uuid4().hex[:12]}"
+    now = datetime.now(timezone.utc)
+    
+    user_doc = {
+        "user_id": user_id,
+        "username": user_data.username,
+        "password": hash_password(user_data.password),
+        "email": user_data.email,
+        "name": user_data.name,
+        "picture": None,
+        "role": user_data.role,
+        "created_at": now.isoformat()
+    }
+    
+    await db.users.insert_one(user_doc)
+    await log_activity(current_user.user_id, current_user.name, "created", "user", user_data.name, f"Created user account: {user_data.username}")
+    
+    user_doc['created_at'] = now
+    del user_doc['password']
+    return User(**user_doc)
+
+@api_router.get("/auth/check-admin")
+async def check_admin_exists():
+    admin = await db.users.find_one({"role": "admin"}, {"_id": 0})
+    return {"admin_exists": admin is not None}
+
+@api_router.post("/auth/change-password")
+async def change_password(request: Request):
+    user = await get_current_user(request)
+    
+    body = await request.json()
+    current_password = body.get("current_password")
+    new_password = body.get("new_password")
+    
+    if not current_password or not new_password:
+        raise HTTPException(status_code=400, detail="Current and new password required")
+    
+    if len(new_password) < 6:
+        raise HTTPException(status_code=400, detail="New password must be at least 6 characters")
+    
+    # Get user with password
+    user_doc = await db.users.find_one({"user_id": user.user_id}, {"_id": 0})
+    
+    # Verify current password
+    if not verify_password(current_password, user_doc["password"]):
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+    
+    # Update password
+    new_hashed = hash_password(new_password)
+    await db.users.update_one(
+        {"user_id": user.user_id},
+        {"$set": {"password": new_hashed}}
+    )
+    
+    await log_activity(user.user_id, user.name, "updated", "password", "Password", "Changed password")
+    
+    return {"message": "Password changed successfully"}
+
+@api_router.post("/auth/admin-reset-password")
+async def admin_reset_password(request: Request):
+    current_user = await get_current_user(request)
+    
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can reset passwords")
+    
+    body = await request.json()
+    target_user_id = body.get("user_id")
+    new_password = body.get("new_password")
+    
+    if not target_user_id or not new_password:
+        raise HTTPException(status_code=400, detail="User ID and new password required")
+    
+    if len(new_password) < 6:
+        raise HTTPException(status_code=400, detail="New password must be at least 6 characters")
+    
+    # Get target user
+    target_user = await db.users.find_one({"user_id": target_user_id}, {"_id": 0})
+    if not target_user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Update password
+    new_hashed = hash_password(new_password)
+    await db.users.update_one(
+        {"user_id": target_user_id},
+        {"$set": {"password": new_hashed}}
+    )
+    
+    await log_activity(
+        current_user.user_id, 
+        current_user.name, 
+        "reset", 
+        "password", 
+        target_user["name"], 
+        f"Admin reset password for {target_user['name']}"
+    )
+    
+    return {"message": f"Password reset successfully for {target_user['name']}"}
+
+
+# Password Reset Request - generates token for self-service reset
+class PasswordResetRequest(BaseModel):
+    username: str
+
+class PasswordResetConfirm(BaseModel):
+    token: str
+    new_password: str
+
+@api_router.post("/auth/request-password-reset")
+async def request_password_reset(reset_request: PasswordResetRequest):
+    # Find user by username OR email
+    user = await db.users.find_one({"username": reset_request.username}, {"_id": 0})
+    
+    if not user:
+        user = await db.users.find_one({"email": reset_request.username}, {"_id": 0})
+    
+    if not user:
+        # Return success even if user not found (security - don't reveal if username exists)
+        return {"message": "If this email/username exists, a reset token has been generated. Please contact your administrator for the token."}
+    
+    # Generate reset token
+    reset_token = f"reset_{uuid.uuid4().hex}"
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=1)  # Token valid for 1 hour
+    
+    # Store reset token
+    await db.password_resets.delete_many({"user_id": user["user_id"]})  # Remove old tokens
+    await db.password_resets.insert_one({
+        "user_id": user["user_id"],
+        "username": user["username"],
+        "token": reset_token,
+        "expires_at": expires_at.isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat()
+    })
+    
+    await log_activity(user["user_id"], user["name"], "requested", "password_reset", "Password Reset", f"Password reset requested for {user['username']}")
+    
+    # Send password reset email
+    email_html = get_password_reset_email(user["name"], reset_token)
+    await send_email(user["email"], "Password Reset - OLT Innovations", email_html)
+    
+    return {
+        "message": "Password reset token generated and sent to your email.",
+        "token": reset_token,
+        "expires_in": "1 hour",
+        "note": "Check your email for the reset token."
+    }
+
+@api_router.post("/auth/reset-password")
+async def reset_password_with_token(reset_data: PasswordResetConfirm):
+    if len(reset_data.new_password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    
+    # Find reset token
+    reset_record = await db.password_resets.find_one({"token": reset_data.token}, {"_id": 0})
+    
+    if not reset_record:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+    
+    # Check expiry
+    expires_at = datetime.fromisoformat(reset_record["expires_at"])
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    
+    if expires_at < datetime.now(timezone.utc):
+        await db.password_resets.delete_one({"token": reset_data.token})
+        raise HTTPException(status_code=400, detail="Reset token has expired. Please request a new one.")
+    
+    # Update password
+    new_hashed = hash_password(reset_data.new_password)
+    await db.users.update_one(
+        {"user_id": reset_record["user_id"]},
+        {"$set": {"password": new_hashed}}
+    )
+    
+    # Delete used token
+    await db.password_resets.delete_one({"token": reset_data.token})
+    
+    # Get user for logging
+    user = await db.users.find_one({"user_id": reset_record["user_id"]}, {"_id": 0})
+    if user:
+        await log_activity(user["user_id"], user["name"], "reset", "password", "Password", f"Password reset via token for {user['username']}")
+    
+    return {"message": "Password reset successfully. You can now login with your new password."}
+
+# Admin endpoint to view pending reset tokens
+@api_router.get("/auth/pending-resets")
+async def get_pending_resets(request: Request):
+    current_user = await get_current_user(request)
+    
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can view pending resets")
+    
+    # Get all pending reset tokens
+    resets = await db.password_resets.find({}, {"_id": 0}).to_list(100)
+    
+    # Filter out expired ones and add status
+    now = datetime.now(timezone.utc)
+    result = []
+    for reset in resets:
+        expires_at = datetime.fromisoformat(reset["expires_at"])
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        
+        if expires_at > now:
+            result.append({
+                "username": reset["username"],
+                "token": reset["token"],
+                "expires_at": reset["expires_at"],
+                "created_at": reset["created_at"]
+            })
+        else:
+            # Clean up expired token
+            await db.password_resets.delete_one({"token": reset["token"]})
+    
+    return result
+
+@api_router.post("/auth/session")
+async def create_session(request: Request, response: Response):
+    body = await request.json()
+    session_id = body.get("session_id")
+    
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id required")
+    
+    # Call Emergent Auth API
+    async with httpx.AsyncClient() as client:
+        auth_response = await client.get(
+            "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
+            headers={"X-Session-ID": session_id}
+        )
+    
+    if auth_response.status_code != 200:
+        raise HTTPException(status_code=401, detail="Invalid session_id")
+    
+    user_data = auth_response.json()
+    session_token = user_data["session_token"]
+    
+    # Check if user exists
+    existing_user = await db.users.find_one(
+        {"email": user_data["email"]},
+        {"_id": 0}
+    )
+    
+    if existing_user:
+        user_id = existing_user["user_id"]
+        # Update user info
+        await db.users.update_one(
+            {"user_id": user_id},
+            {"$set": {
+                "name": user_data["name"],
+                "picture": user_data.get("picture")
+            }}
+        )
+    else:
+        # Create new user
+        user_id = f"user_{uuid.uuid4().hex[:12]}"
+        
+        # Check if this is the first user - make them admin
+        user_count = await db.users.count_documents({})
+        default_role = "admin" if user_count == 0 else "employee"
+        
+        await db.users.insert_one({
+            "user_id": user_id,
+            "email": user_data["email"],
+            "name": user_data["name"],
+            "picture": user_data.get("picture"),
+            "role": default_role,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        })
+    
+    # Create session
+    await db.user_sessions.insert_one({
+        "user_id": user_id,
+        "session_token": session_token,
+        "expires_at": datetime.now(timezone.utc) + timedelta(days=7),
+        "created_at": datetime.now(timezone.utc)
+    })
+    
+    # Set cookie
+    response.set_cookie(
+        key="session_token",
+        value=session_token,
+        httponly=True,
+        secure=True,
+        samesite="none",
+        path="/",
+        max_age=7 * 24 * 60 * 60
+    )
+    
+    # Get full user data
+    user_doc = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+    if isinstance(user_doc['created_at'], str):
+        user_doc['created_at'] = datetime.fromisoformat(user_doc['created_at'])
+    
+    return User(**user_doc)
+
+@api_router.get("/auth/me", response_model=User)
+async def get_me(request: Request):
+    return await get_current_user(request)
+
+@api_router.post("/auth/logout")
+async def logout(request: Request, response: Response):
+    session_token = request.cookies.get("session_token")
+    if session_token:
+        await db.user_sessions.delete_one({"session_token": session_token})
+    
+    response.delete_cookie("session_token", path="/")
+    return {"message": "Logged out successfully"}
+
+
+# ─────── User Management Routes (Admin only) ─────────────
+@api_router.get("/users", response_model=List[User])
+async def get_users(request: Request):
+    user = await get_current_user(request)
+    
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can view all users")
+    
+    users = await db.users.find({}, {"_id": 0}).to_list(1000)
+    
+    # Convert datetime strings
+    for u in users:
+        if isinstance(u['created_at'], str):
+            u['created_at'] = datetime.fromisoformat(u['created_at'])
+    
+    return users
+
+
+# ─── REST API Endpoints ────────────────────────────────────────────────────────
+
 @api_router.get("/")
 async def root():
     return {"message": "VitalSync Health Monitoring API"}
@@ -268,18 +973,17 @@ async def get_patients():
         }
     ]
 
-# WebSocket endpoint for real-time updates
+
+# ─── WebSocket Endpoint ────────────────────────────────────────────────────────
+
 @api_router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
-        # Send initial data
         initial_data = generate_dashboard_data()
         await websocket.send_json(initial_data.model_dump())
-        
-        # Keep connection alive and send updates
+
         while True:
-            # Wait for 3 seconds before sending next update
             await asyncio.sleep(3)
             data = generate_dashboard_data()
             await websocket.send_json(data.model_dump())
@@ -289,6 +993,7 @@ async def websocket_endpoint(websocket: WebSocket):
         logger.error(f"WebSocket error: {e}")
         manager.disconnect(websocket)
 
+# ─── Middleware & Router ───────────────────────────────────────────────────────
 
 app.add_middleware(
     CORSMiddleware,
@@ -298,10 +1003,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include the router in the main app
 app.include_router(api_router)
 
+# ─── Shutdown ──────────────────────────────────────────────────────────────────
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
-    client.close()
+    if client:
+        client.close()
