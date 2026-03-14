@@ -3,7 +3,7 @@ import { toast } from "sonner";
 import { 
   Heart, Wind, Moon, AlertTriangle, Bell, Phone, User,
   Wifi, Battery, Activity, Footprints, ThermometerSun,
-  Sun, Radio, ChevronDown, AlertCircle
+  Sun, Radio, ChevronDown, AlertCircle, LogOut, Settings
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { Badge } from "../components/ui/badge";
@@ -12,6 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { ScrollArea } from "../components/ui/scroll-area";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Area, AreaChart } from "recharts";
 import { authFetch, getAuthHeaders } from "../utils/authFetch"; // named exports
+import { Link, useNavigate } from "react-router-dom";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 
@@ -19,14 +20,32 @@ const Dashboard = ({ backendUrl }) => {
   const [dashboardData, setDashboardData] = useState(null);
   const [isConnected,   setIsConnected]   = useState(false);
   const [lastUpdate,    setLastUpdate]    = useState(null);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const navigate = useNavigate();
 
   // ── Auth state ──────────────────────────────────────────────────────────────
   const [user,        setUser]        = useState(null);  // populated from /api/auth/me
   const [authLoading, setAuthLoading] = useState(true);  // true until auth resolves
   // ────────────────────────────────────────────────────────────────────────────
-
+  
   const wsRef               = useRef(null);
   const reconnectTimeoutRef = useRef(null);
+  
+  // ── handle Logout ──────────────────────────────────────────────────────────────
+  const handleLogout = async () => {
+    try {
+      await authFetch(`${BACKEND_URL}/api/auth/logout`, {
+        method: 'POST'
+      });
+      localStorage.removeItem('session_token');
+      toast.success('Logged out successfully');
+      navigate('/login');
+    } catch (error) {
+      toast.error('Logout failed');
+    }
+  };
+
+  
 
   // ── 1. Auth check — runs on mount, before WebSocket or dashboard renders ───
   useEffect(() => {
@@ -173,22 +192,68 @@ const Dashboard = ({ backendUrl }) => {
             </button>
 
             {/* 4. Authenticated user — data comes from /api/auth/me response */}
-            <div className="flex items-center gap-3" data-testid="user-profile">
-              <div className="text-right">
-                <p className="text-sm font-semibold text-slate-900">
-                  {user?.full_name ?? user?.name ?? user?.email ?? "User"}
-                </p>
-                <p className="text-xs text-slate-500">
-                  {user?.role ?? "Caregiver"} | Online
-                </p>
-              </div>
-              <div className="w-10 h-10 rounded-full bg-slate-200 overflow-hidden flex items-center justify-center">
-                {user?.avatar_url
-                  ? <img src={user.avatar_url} alt={user?.name ?? "avatar"} className="w-full h-full object-cover" />
-                  : <User className="w-5 h-5 text-slate-400" />
-                }
-              </div>
-            </div>
+            <div className="relative">
+  <button
+    onClick={() => setUserMenuOpen(!userMenuOpen)}
+    className="flex items-center gap-3 hover:bg-slate-100 px-3 py-2 rounded-lg transition"
+  >
+    <div className="text-right hidden sm:block">
+      <p className="text-sm font-semibold text-slate-900">
+        {user?.full_name ?? user?.name ?? user?.email ?? "User"}
+      </p>
+      <p className="text-xs text-slate-500">
+        {user?.role ?? "Caregiver"} | Online
+      </p>
+    </div>
+
+    <div className="w-10 h-10 rounded-full bg-slate-200 overflow-hidden flex items-center justify-center">
+      {user?.avatar_url ? (
+        <img
+          src={user.avatar_url}
+          alt={user?.name ?? "avatar"}
+          className="w-full h-full object-cover"
+        />
+      ) : (
+        <User className="w-5 h-5 text-slate-400" />
+      )}
+    </div>
+
+    <ChevronDown className="w-4 h-4 text-slate-500" />
+  </button>
+
+  {/* Dropdown menu */}
+  {userMenuOpen && (
+    <div className="absolute right-0 mt-2 w-48 bg-white border border-slate-200 rounded-lg shadow-lg py-2 z-50">
+
+      <Link
+        to="/profile"
+        className="flex items-center px-4 py-2 text-sm text-slate-700 hover:bg-slate-50"
+        onClick={() => setUserMenuOpen(false)}
+      >
+        <User className="w-4 h-4 mr-2" />
+        Profile
+      </Link>
+
+      <Link
+        to="/settings"
+        className="flex items-center px-4 py-2 text-sm text-slate-700 hover:bg-slate-50"
+        onClick={() => setUserMenuOpen(false)}
+      >
+        <Settings className="w-4 h-4 mr-2" />
+        Settings
+      </Link>
+
+      <button
+        onClick={handleLogout}
+        className="flex w-full items-center px-4 py-2 text-sm text-red-600 hover:bg-red-50"
+      >
+        <LogOut className="w-4 h-4 mr-2" />
+        Logout
+      </button>
+
+    </div>
+  )}
+</div>
           </div>
         </div>
       </header>
