@@ -5,12 +5,15 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { toast } from 'sonner';
+import { useAuth } from '@/context/AuthContext';
+import { ROLE_HOME } from '@/constants/roles';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 
 
 export default function NewLogin() {
   const navigate = useNavigate();
+  const { setUser } = useAuth();
   const [loading, setLoading] = useState(false);
   const [showForgotPassword, setShowForgotPassword] = useState(false);
   const [resetStep, setResetStep] = useState(1); // 1 = request token, 2 = enter token & new password
@@ -58,8 +61,9 @@ export default function NewLogin() {
         if (userData.session_token) {
           localStorage.setItem('session_token', userData.session_token);
         }
+        setUser(userData);
         toast.success(`Welcome back, ${userData.name}!`);
-        navigate('/dashboard', { state: { user: userData } });
+        navigate(ROLE_HOME[userData.role] ?? '/dashboard', { replace: true });
       } else {
         const error = await response.json();
         toast.error(error.detail || 'Login failed');

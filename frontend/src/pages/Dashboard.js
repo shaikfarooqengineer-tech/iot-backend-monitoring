@@ -5,14 +5,15 @@ import {
   Wifi, Battery, Activity, Footprints, ThermometerSun,
   Sun, Radio, ChevronDown, AlertCircle, LogOut, Settings
 } from "lucide-react";
-import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
-import { Badge } from "../components/ui/badge";
-// import { Progress } from "../components/ui/progress";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
-import { ScrollArea } from "../components/ui/scroll-area";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Area, AreaChart } from "recharts";
-import { authFetch, getAuthHeaders } from "../utils/authFetch"; // named exports
+import { authFetch, getAuthHeaders } from "@/utils/authFetch";
 import { Link, useNavigate } from "react-router-dom";
+import { useAuth } from "@/context/AuthContext";
+import { RoleBadge } from "@/components/RoleBadge";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 
@@ -23,9 +24,8 @@ const Dashboard = ({ backendUrl }) => {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const navigate = useNavigate();
 
-  // ── Auth state ──────────────────────────────────────────────────────────────
-  const [user,        setUser]        = useState(null);  // populated from /api/auth/me
-  const [authLoading, setAuthLoading] = useState(true);  // true until auth resolves
+  // ── Auth from global context ─────────────────────────────────────────────────
+  const { user, logout } = useAuth();
   // ────────────────────────────────────────────────────────────────────────────
   
   const wsRef               = useRef(null);
@@ -33,42 +33,9 @@ const Dashboard = ({ backendUrl }) => {
   
   // ── handle Logout ──────────────────────────────────────────────────────────────
   const handleLogout = async () => {
-    try {
-      await authFetch(`${BACKEND_URL}/api/auth/logout`, {
-        method: 'POST'
-      });
-      localStorage.removeItem('session_token');
-      toast.success('Logged out successfully');
-      navigate('/login');
-    } catch (error) {
-      toast.error('Logout failed');
-    }
+    await logout();
+    navigate('/login');
   };
-
-  
-
-  // ── 1. Auth check — runs on mount, before WebSocket or dashboard renders ───
-  useEffect(() => {
-    const verifyAuth = async () => {
-      try {
-        const userRes = await authFetch(`${BACKEND_URL}/api/auth/me`);
-        if (userRes.ok) {
-          const userData = await userRes.json();
-          setUser(userData);
-        } else {
-          // 401 / 403 → redirect to login
-          toast.error("Session expired. Please log in again.");
-          window.location.href = "/login";
-        }
-      } catch (err) {
-        toast.error("Authentication failed. Please log in.");
-        window.location.href = "/login";
-      } finally {
-        setAuthLoading(false); // unblock the rest of the component either way
-      }
-    };
-    verifyAuth();
-  }, []); // runs once
 
   // ── 2 & 3. WebSocket — only opens after auth succeeds, token sent in URL ───
   const connectWebSocket = useCallback(() => {
@@ -126,19 +93,8 @@ const Dashboard = ({ backendUrl }) => {
     };
   }, [connectWebSocket, user]);
 
-  // ── 5. Two-phase loading screen ────────────────────────────────────────────
-  if (authLoading) {                            // phase 1: waiting for /api/auth/me
-    return (
-      <div className="dashboard-container flex items-center justify-center min-h-screen">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mx-auto mb-4" />
-          <p className="text-slate-600 font-medium">Verifying authentication…</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (!dashboardData) {                         // phase 2: waiting for first WS payload
+  // ── 5. Loading screen — waiting for first WS payload ────────────────────
+  if (!dashboardData) {
     return (
       <div className="dashboard-container flex items-center justify-center min-h-screen">
         <div className="text-center">
@@ -160,7 +116,7 @@ const Dashboard = ({ backendUrl }) => {
     <div className="dashboard-container" data-testid="dashboard-container">
 
       {/* Header */}
-      <header className="dashboard-header sticky top-0 z-50 bg-white/95 backdrop-blur-sm" data-testid="dashboard-header">
+      <header className="dashboard-header sticky top-0 z-10 bg-white/95 backdrop-blur-sm" data-testid="dashboard-header">
         <div className="max-w-[1800px] mx-auto flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-bold text-slate-900" style={{ fontFamily: "Manrope, sans-serif" }}>
@@ -201,9 +157,7 @@ const Dashboard = ({ backendUrl }) => {
       <p className="text-sm font-semibold text-slate-900">
         {user?.full_name ?? user?.name ?? user?.email ?? "User"}
       </p>
-      <p className="text-xs text-slate-500">
-        {user?.role ?? "Caregiver"} | Online
-      </p>
+      <RoleBadge role={user?.role} />
     </div>
 
     <div className="w-10 h-10 rounded-full bg-slate-200 overflow-hidden flex items-center justify-center">

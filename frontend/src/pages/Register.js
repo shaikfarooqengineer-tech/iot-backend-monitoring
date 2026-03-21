@@ -1,183 +1,218 @@
-import { useState, useEffect } from 'react';
-import { authFetch } from '@/utils/authFetch';
-import { useNavigate } from 'react-router-dom';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { toast } from 'sonner';
+// ═══════════════════════════════════════════════════════════════════════════
+// FILE: src/pages/Register.js
+// PURPOSE: One-time bootstrap form to create the first superadmin account.
+//          Redirects to /login if a superadmin already exists.
+// ═══════════════════════════════════════════════════════════════════════════
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
+import { useState, useEffect } from "react";
+import { useNavigate, Link } from "react-router-dom";
+import { toast } from "sonner";
+import { authFetch } from "@/utils/authFetch";
+import { useAuth } from "@/context/AuthContext";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 
 export default function Register() {
   const navigate = useNavigate();
-  const [loading, setLoading] = useState(false);
-  const [formData, setFormData] = useState({
-    username: '',
-    password: '',
-    confirmPassword: '',
-    email: '',
-    name: '',
-    company_name: ''
+  const { setUser } = useAuth();
+
+  const [checking, setChecking] = useState(true);  // checking if admin already exists
+  const [loading,  setLoading]  = useState(false);
+  const [form, setForm] = useState({
+    company_name: "",
+    name: "",
+    email: "",
+    username: "",
+    password: "",
+    confirm_password: "",
   });
 
+  // ─── Guard: if superadmin already exists, send to login ─────────────────
   useEffect(() => {
-    const checkAdminExists = async () => {
+    const checkAdmin = async () => {
       try {
-        const response = await fetch(`${BACKEND_URL}/api/auth/check-admin`);
-        const data = await response.json();
-        if (data.admin_exists) {
-          navigate('/login');
+        const res = await authFetch(`${process.env.REACT_APP_BACKEND_URL}/api/auth/check-admin`);
+        if (res.ok) {
+          const { admin_exists } = await res.json();
+          if (admin_exists) {
+            toast.info("System already configured. Please sign in.");
+            navigate("/login", { replace: true });
+          }
         }
-      } catch (error) {
-        console.error('Error checking admin:', error);
+      } catch {
+        // Network error — show the form anyway and let submit handle it
+      } finally {
+        setChecking(false);
       }
     };
-    checkAdminExists();
+    checkAdmin();
   }, [navigate]);
 
+  // ─── Field updater ────────────────────────────────────────────────────────
+  const set = (field) => (e) => setForm(f => ({ ...f, [field]: e.target.value }));
+
+  // ─── Submit ───────────────────────────────────────────────────────────────
   const handleSubmit = async (e) => {
     e.preventDefault();
-    
-    if (formData.password !== formData.confirmPassword) {
-      toast.error('Passwords do not match');
+
+    // Client-side validation
+    if (!form.company_name || !form.name || !form.email || !form.username || !form.password) {
+      toast.error("All fields are required");
       return;
     }
-
-    if (formData.password.length < 6) {
-      toast.error('Password must be at least 6 characters');
+    if (form.password.length < 6) {
+      toast.error("Password must be at least 6 characters");
+      return;
+    }
+    if (form.password !== form.confirm_password) {
+      toast.error("Passwords do not match");
       return;
     }
 
     setLoading(true);
     try {
-      const response = await authFetch(`${BACKEND_URL}/api/auth/register-admin`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          username: formData.username,
-          password: formData.password,
-          email: formData.email,
-          name: formData.name,
-          company_name: formData.company_name
-        })
-      });
+      const res = await authFetch(
+        `${process.env.REACT_APP_BACKEND_URL}/api/auth/register-admin`,
+        {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          // confirm_password is NOT sent — backend doesn't need it
+          body: JSON.stringify({
+            company_name: form.company_name,
+            name:         form.name,
+            email:        form.email,
+            username:     form.username,
+            password:     form.password,
+          }),
+        }
+      );
 
-      if (response.ok) {
-        const userData = await response.json();
-        toast.success('Admin account created successfully!');
-        navigate('/dashboard', { state: { user: userData } });
+      if (res.ok) {
+        const userData = await res.json();
+        // Store session token from login response
+        if (userData.session_token) {
+          localStorage.setItem("session_token", userData.session_token);
+        }
+        setUser(userData);  // update global auth context immediately
+        toast.success("Superadmin account created! Welcome to VitalSync.");
+        navigate("/hospitals", { replace: true });
       } else {
-        const error = await response.json();
-        toast.error(error.detail || 'Registration failed');
+        const err = await res.json().catch(() => ({ detail: "Registration failed" }));
+        toast.error(err.detail ?? "Registration failed");
       }
-    } catch (error) {
-      toast.error('Registration failed. Please try again.');
+    } catch {
+      toast.error("Network error — please try again");
     } finally {
       setLoading(false);
     }
   };
 
+  // ─── Loading state while checking existing admin ─────────────────────────
+  if (checking) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-indigo-600" />
+      </div>
+    );
+  }
+
+  // ─── Registration form ────────────────────────────────────────────────────
   return (
-    <div 
-      className="min-h-screen flex items-center justify-center p-4 bg-cover bg-center"
-      style={{ backgroundImage: `url('https://images.unsplash.com/photo-1685602729277-54538940a06c?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2Nzd8MHwxfHNlYXJjaHwxfHxtb2Rlcm4lMjBtaW5pbWFsJTIwb2ZmaWNlJTIwYWJzdHJhY3QlMjBiYWNrZ3JvdW5kfGVufDB8fHx8MTc3MjcwOTI4Mnww&ixlib=rb-4.1.0&q=85')` }}
-    >
-      <div className="absolute inset-0 bg-gradient-to-br from-indigo-900/40 via-slate-900/30 to-violet-900/40"></div>
-      
-      <div className="relative w-full max-w-md">
-        <div className="bg-white/90 backdrop-blur-md border border-slate-200 shadow-2xl rounded-2xl p-8">
-          <div className="text-center mb-6">
-            <h1 className="text-3xl font-bold text-slate-900 mb-2">Create Admin Account</h1>
-            <p className="text-slate-600">Set up your ERP system</p>
+    <div className="min-h-screen bg-slate-50 flex items-center justify-center px-4 py-12">
+      <Card className="w-full max-w-md shadow-lg">
+        <CardHeader className="text-center pb-2">
+          <div className="w-12 h-12 rounded-xl bg-indigo-600 flex items-center justify-center mx-auto mb-3">
+            <span className="text-white text-xl font-bold">V</span>
           </div>
+          <CardTitle className="text-2xl">Set up VitalSync</CardTitle>
+          <CardDescription>
+            Create the first superadmin account. This can only be done once.
+          </CardDescription>
+        </CardHeader>
 
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div>
-              <Label htmlFor="company_name">Company Name *</Label>
+        <CardContent>
+          <form onSubmit={handleSubmit} className="space-y-4 mt-2">
+            <div className="space-y-1">
+              <Label>Company name</Label>
               <Input
-                id="company_name"
-                data-testid="company-name-input"
-                value={formData.company_name}
-                onChange={(e) => setFormData({...formData, company_name: e.target.value})}
-                required
-                placeholder="OLT Innovations"
+                placeholder="Acme Health Solutions"
+                value={form.company_name}
+                onChange={set("company_name")}
+                disabled={loading}
               />
             </div>
 
-            <div>
-              <Label htmlFor="name">Your Full Name *</Label>
+            <div className="space-y-1">
+              <Label>Your full name</Label>
               <Input
-                id="name"
-                data-testid="name-input"
-                value={formData.name}
-                onChange={(e) => setFormData({...formData, name: e.target.value})}
-                required
-                placeholder="John Doe"
+                placeholder="Dr. Jane Smith"
+                value={form.name}
+                onChange={set("name")}
+                disabled={loading}
               />
             </div>
 
-            <div>
-              <Label htmlFor="email">Email *</Label>
+            <div className="space-y-1">
+              <Label>Email</Label>
               <Input
-                id="email"
                 type="email"
-                data-testid="email-input"
-                value={formData.email}
-                onChange={(e) => setFormData({...formData, email: e.target.value})}
-                required
                 placeholder="admin@company.com"
+                value={form.email}
+                onChange={set("email")}
+                disabled={loading}
               />
             </div>
 
-            <div>
-              <Label htmlFor="username">Username *</Label>
+            <div className="space-y-1">
+              <Label>Username</Label>
               <Input
-                id="username"
-                data-testid="username-input"
-                value={formData.username}
-                onChange={(e) => setFormData({...formData, username: e.target.value})}
-                required
-                placeholder="admin"
+                placeholder="admin_username"
+                value={form.username}
+                onChange={set("username")}
+                disabled={loading}
+                autoComplete="username"
               />
             </div>
 
-            <div>
-              <Label htmlFor="password">Password *</Label>
+            <div className="space-y-1">
+              <Label>Password</Label>
               <Input
-                id="password"
                 type="password"
-                data-testid="password-input"
-                value={formData.password}
-                onChange={(e) => setFormData({...formData, password: e.target.value})}
-                required
                 placeholder="Minimum 6 characters"
+                value={form.password}
+                onChange={set("password")}
+                disabled={loading}
+                autoComplete="new-password"
               />
             </div>
 
-            <div>
-              <Label htmlFor="confirmPassword">Confirm Password *</Label>
+            <div className="space-y-1">
+              <Label>Confirm password</Label>
               <Input
-                id="confirmPassword"
                 type="password"
-                data-testid="confirm-password-input"
-                value={formData.confirmPassword}
-                onChange={(e) => setFormData({...formData, confirmPassword: e.target.value})}
-                required
                 placeholder="Re-enter password"
+                value={form.confirm_password}
+                onChange={set("confirm_password")}
+                disabled={loading}
+                autoComplete="new-password"
               />
             </div>
 
-            <Button
-              type="submit"
-              data-testid="register-button"
-              disabled={loading}
-              className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-6 text-lg rounded-md shadow-sm"
-            >
-              {loading ? 'Creating Account...' : 'Create Admin Account'}
+            <Button type="submit" className="w-full" disabled={loading}>
+              {loading ? "Creating account…" : "Create superadmin account"}
             </Button>
           </form>
-        </div>
-      </div>
+
+          <p className="text-center text-sm text-slate-500 mt-4">
+            Already set up?{" "}
+            <Link to="/login" className="text-indigo-600 hover:underline font-medium">
+              Sign in
+            </Link>
+          </p>
+        </CardContent>
+      </Card>
     </div>
   );
 }
