@@ -1,11 +1,14 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // FILE: src/layouts/AdminLayout.js
 // PURPOSE: Sidebar-driven shell for superadmin, hospital_admin, and staff.
-//          Sidebar visible on desktop, drawer on mobile.
+//
+//  Desktop : Sidebar always mounted. X → collapses to icon-only rail.
+//  Mobile  : Sidebar hidden. Menu hamburger → slides in drawer.
+//            X inside drawer → closes drawer → back to hamburger.
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { useState } from "react";
-import { Menu, X } from "lucide-react";
+import { Menu } from "lucide-react";
 import { Sidebar } from "@/components/Sidebar";
 
 export function AdminLayout({ children, pageTitle }) {
@@ -15,11 +18,13 @@ export function AdminLayout({ children, pageTitle }) {
     <div className="flex h-screen bg-slate-50 overflow-hidden">
 
       {/* ─── Desktop sidebar (hidden on mobile) ────────────────────────── */}
+      {/* No onClose here — X will collapse to icon rail, not unmount */}
       <div className="hidden lg:flex lg:flex-shrink-0">
         <Sidebar />
       </div>
 
       {/* ─── Mobile drawer overlay ──────────────────────────────────────── */}
+      {/* onClose passed here — X will close the drawer back to hamburger  */}
       {mobileOpen && (
         <div className="fixed inset-0 z-40 flex lg:hidden">
           {/* Backdrop */}
@@ -27,15 +32,12 @@ export function AdminLayout({ children, pageTitle }) {
             className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm"
             onClick={() => setMobileOpen(false)}
           />
-          {/* Drawer panel */}
+          {/* Drawer panel — Sidebar owns logo + X, no extra header */}
           <div className="relative z-50 flex flex-col w-64 bg-white shadow-xl">
-            <div className="flex items-center justify-between p-4 border-b border-slate-200">
-              <span className="text-sm font-semibold text-slate-700">Menu</span>
-              <button onClick={() => setMobileOpen(false)} className="p-1 rounded hover:bg-slate-100">
-                <X className="w-5 h-5 text-slate-500" />
-              </button>
-            </div>
-            <Sidebar onNavigate={() => setMobileOpen(false)} />
+            <Sidebar
+              onNavigate={() => setMobileOpen(false)}
+              onClose={() => setMobileOpen(false)}
+            />
           </div>
         </div>
       )}
@@ -43,7 +45,7 @@ export function AdminLayout({ children, pageTitle }) {
       {/* ─── Main content area ─────────────────────────────────────────── */}
       <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
 
-        {/* Mobile-only top bar */}
+        {/* Mobile-only top bar — shows hamburger when drawer is closed */}
         <div className="lg:hidden flex items-center gap-3 px-4 py-3 bg-white border-b border-slate-200 shadow-sm">
           <button
             onClick={() => setMobileOpen(true)}
@@ -51,7 +53,9 @@ export function AdminLayout({ children, pageTitle }) {
           >
             <Menu className="w-5 h-5 text-slate-600" />
           </button>
-          <h1 className="text-lg font-semibold text-slate-900">{pageTitle ?? "VitalSync"}</h1>
+          <h1 className="text-lg font-semibold text-slate-900">
+            {pageTitle ?? "VitalSync"}
+          </h1>
         </div>
 
         {/* Page content */}

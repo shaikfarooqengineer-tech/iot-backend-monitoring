@@ -2,8 +2,8 @@
 // FILE: src/components/Sidebar.js
 // PURPOSE: Navigation sidebar for admin/staff roles.
 //          Filters nav items by role. Has logo top, profile+logout bottom.
-//          Collapsed: icon-only. Hover on logo → open hint toast.
-//          Hover on icons → label toast. Smooth animated transitions.
+//          Desktop  → Collapsed: icon-only rail. X collapses, logo hover expands.
+//          Mobile   → Always fully expanded. X fires onClose (closes drawer).
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { useState, useRef, useCallback } from "react";
@@ -29,10 +29,8 @@ const NAV_ICONS = {
 };
 
 // ─── Mini toast hook ─────────────────────────────────────────────────────────
-// Renders a small floating label near the hovered element.
-// Returns { toasts, showToast } — toasts rendered as a portal-free list.
 function useHoverToast() {
-  const [toasts, setToasts] = useState([]);   // [{ id, label, x, y }]
+  const [toasts, setToasts] = useState([]);
   const timerRef = useRef({});
 
   const showToast = useCallback((label, anchorEl) => {
@@ -43,7 +41,6 @@ function useHoverToast() {
     setToasts(prev => [...prev, {
       id,
       label,
-      // position: right of the sidebar element, vertically centred on it
       top:  rect.top  + rect.height / 2,
       left: rect.right + 10,
     }]);
@@ -77,7 +74,6 @@ function ToastLayer({ toasts }) {
           "
         >
           {t.label}
-          {/* small left arrow caret */}
           <span
             className="absolute right-full top-1/2 -translate-y-1/2
               border-4 border-transparent border-r-slate-900"
@@ -89,24 +85,36 @@ function ToastLayer({ toasts }) {
 }
 
 // ─── Sidebar ─────────────────────────────────────────────────────────────────
-export function Sidebar({ onNavigate }) {
+// onNavigate — called on nav link click
+// onClose    — provided only on mobile; X closes the drawer instead of collapsing
+export function Sidebar({ onNavigate, onClose }) {
   const { user, logout } = useAuth();
   const { role, can }    = usePermissions();
+
   const [isCollapsed, setIsCollapsed] = useState(false);
   const { toasts, showToast, clearToastsFor } = useHoverToast();
 
+  // On mobile (onClose provided) collapse behaviour is fully disabled
+  const isMobile = !!onClose;
+
   const visibleNav = NAV_ITEMS.filter(item => {
-    if (item.roles      && !item.roles.includes(role))   return false;
-    if (item.permission && !can(item.permission))         return false;
+    if (item.roles      && !item.roles.includes(role))  return false;
+    if (item.permission && !can(item.permission))        return false;
     return true;
   });
 
-  // ── helpers ──
+  // Toasts only fire on desktop collapsed state
   const handleIconHover = (e, label) => {
-    if (isCollapsed) showToast(label, e.currentTarget);
+    if (isCollapsed && !isMobile) showToast(label, e.currentTarget);
   };
   const handleIconLeave = (label) => {
-    if (isCollapsed) clearToastsFor(label);
+    if (isCollapsed && !isMobile) clearToastsFor(label);
+  };
+
+  // X button: mobile → close drawer | desktop → collapse to icon rail
+  const handleClose = () => {
+    if (onClose) onClose();
+    else setIsCollapsed(true);
   };
 
   return (
@@ -117,27 +125,22 @@ export function Sidebar({ onNavigate }) {
           relative flex flex-col h-full bg-white border-r border-slate-200
           overflow-hidden
           transition-[width] duration-300 ease-in-out
-          ${isCollapsed ? "w-16" : "w-64"}
+          ${(isCollapsed && !isMobile) ? "w-16" : "w-64"}
         `}
       >
-        {/* ─── Logo + Toggle ──────────────────────────────────────────── */}
-        <div
-          className="
-            flex items-center justify-between
-            px-3 py-4 border-b border-slate-100
-            min-h-[60px]
-          "
-        >
-          {/* Logo icon — when collapsed, hover reveals open-arrow + toast */}
+        {/* ─── Logo + X ───────────────────────────────────────────────── */}
+        <div className="flex items-center justify-between px-3 py-4 border-b border-slate-100 min-h-[60px]">
+
+          {/* Logo — desktop collapsed hover reveals open arrow + toast */}
           <div
             className="group relative flex items-center gap-3 cursor-pointer select-none"
             onMouseEnter={e => {
-              if (isCollapsed) showToast("opensider", e.currentTarget);
+              if (isCollapsed && !isMobile) showToast("opensider", e.currentTarget);
             }}
             onMouseLeave={() => {
-              if (isCollapsed) clearToastsFor("opensider");
+              if (isCollapsed && !isMobile) clearToastsFor("opensider");
             }}
-            onClick={() => isCollapsed && setIsCollapsed(false)}
+            onClick={() => (isCollapsed && !isMobile) && setIsCollapsed(false)}
           >
             {/* Logo bubble */}
             <div
@@ -148,16 +151,15 @@ export function Sidebar({ onNavigate }) {
                 group-hover:bg-indigo-700
               "
             >
-              {/* collapsed + hovering → show open arrow; else show Activity */}
               <span className="relative w-4 h-4">
                 <Activity
                   className={`
                     absolute inset-0 w-4 h-4 text-white
                     transition-all duration-200
-                    ${isCollapsed ? "group-hover:opacity-0 group-hover:scale-75" : ""}
+                    ${(isCollapsed && !isMobile) ? "group-hover:opacity-0 group-hover:scale-75" : ""}
                   `}
                 />
-                {isCollapsed && (
+                {(isCollapsed && !isMobile) && (
                   <PanelRightOpen
                     className="
                       absolute inset-0 w-5 h-5 text-white
@@ -170,12 +172,12 @@ export function Sidebar({ onNavigate }) {
               </span>
             </div>
 
-            {/* Brand name — only when expanded */}
+            {/* Brand name */}
             <span
               className={`
                 text-base font-bold text-slate-900 whitespace-nowrap
                 transition-all duration-300
-                ${isCollapsed
+                ${(isCollapsed && !isMobile)
                   ? "opacity-0 w-0 overflow-hidden"
                   : "opacity-100 w-auto"}
               `}
@@ -184,15 +186,17 @@ export function Sidebar({ onNavigate }) {
             </span>
           </div>
 
-          {/* Collapse button — only shown when expanded */}
+          {/* X button */}
           <button
-            onClick={() => setIsCollapsed(true)}
+            onClick={handleClose}
             className={`
               p-1 rounded-md hover:bg-slate-100 flex-shrink-0
               transition-all duration-200
-              ${isCollapsed ? "opacity-0 pointer-events-none w-0" : "opacity-100 w-auto"}
+              ${(isCollapsed && !isMobile)
+                ? "opacity-0 pointer-events-none w-0"
+                : "opacity-100 w-auto"}
             `}
-            aria-label="Collapse sidebar"
+            aria-label="Close sidebar"
           >
             <X className="w-5 h-5 text-slate-500" />
           </button>
@@ -213,19 +217,18 @@ export function Sidebar({ onNavigate }) {
                 className={({ isActive }) => `
                   flex items-center gap-3 px-3 py-2.5 rounded-lg
                   text-sm font-medium transition-all duration-200
-                  ${isCollapsed ? "justify-center" : ""}
+                  ${(isCollapsed && !isMobile) ? "justify-center" : ""}
                   ${isActive
                     ? "bg-indigo-50 text-indigo-700"
                     : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"}
                 `}
               >
                 <Icon className="w-5 h-5 flex-shrink-0" />
-
                 <span
                   className={`
                     whitespace-nowrap overflow-hidden
                     transition-all duration-300
-                    ${isCollapsed
+                    ${(isCollapsed && !isMobile)
                       ? "opacity-0 w-0 max-w-0"
                       : "opacity-100 w-auto max-w-[160px]"}
                   `}
@@ -239,12 +242,12 @@ export function Sidebar({ onNavigate }) {
 
         {/* ─── Profile + Logout ──────────────────────────────────────── */}
         <div className="border-t border-slate-200 px-2 py-3 space-y-1">
+
           {/* Profile row */}
           <div
             className={`
-              flex items-center gap-3 px-3 py-2 rounded-lg
-              cursor-default
-              ${isCollapsed ? "justify-center" : ""}
+              flex items-center gap-3 px-3 py-2 rounded-lg cursor-default
+              ${(isCollapsed && !isMobile) ? "justify-center" : ""}
             `}
             onMouseEnter={e =>
               handleIconHover(e, user?.full_name ?? user?.name ?? "Profile")
@@ -271,9 +274,8 @@ export function Sidebar({ onNavigate }) {
             {/* Name + role badge */}
             <div
               className={`
-                min-w-0 overflow-hidden
-                transition-all duration-300
-                ${isCollapsed
+                min-w-0 overflow-hidden transition-all duration-300
+                ${(isCollapsed && !isMobile)
                   ? "opacity-0 w-0 max-w-0"
                   : "opacity-100 w-auto max-w-[160px]"}
               `}
@@ -294,16 +296,14 @@ export function Sidebar({ onNavigate }) {
               flex items-center gap-3 w-full px-3 py-2.5 rounded-lg
               text-sm font-medium transition-all duration-200
               text-slate-600 hover:bg-red-50 hover:text-red-700
-              ${isCollapsed ? "justify-center" : ""}
+              ${(isCollapsed && !isMobile) ? "justify-center" : ""}
             `}
           >
             <LogOut className="w-5 h-5 flex-shrink-0" />
-
             <span
               className={`
-                whitespace-nowrap overflow-hidden
-                transition-all duration-300
-                ${isCollapsed
+                whitespace-nowrap overflow-hidden transition-all duration-300
+                ${(isCollapsed && !isMobile)
                   ? "opacity-0 w-0 max-w-0"
                   : "opacity-100 w-auto max-w-[160px]"}
               `}
@@ -314,7 +314,7 @@ export function Sidebar({ onNavigate }) {
         </div>
       </div>
 
-      {/* ── Hover toasts (rendered outside sidebar so they're never clipped) */}
+      {/* ── Hover toasts ───────────────────────────────────────────────── */}
       <ToastLayer toasts={toasts} />
     </>
   );
