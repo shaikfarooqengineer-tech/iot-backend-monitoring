@@ -1,4 +1,6 @@
 # Change this line at the top:
+from fastapi import Query
+from fastapi import Depends
 from fastapi import FastAPI, APIRouter, WebSocket, WebSocketDisconnect, Request, Response, HTTPException
 from datetime import datetime, timezone, timedelta
 import bcrypt
@@ -15,6 +17,7 @@ import uuid
 import asyncio
 import random
 import json
+from enum import Enum
 
 
 ROOT_DIR = Path(__file__).parent
@@ -82,6 +85,54 @@ class Patient(BaseModel):
     status: str
     avatar_url: Optional[str] = None
 
+# ─── Permission Models ────────────────────────────────────────────────────────
+class HospitalCreate(BaseModel):
+    name: str
+    address: Optional[str] = None
+
+
+
+# ─── User Role Models ────────────────────────────────────────────────────────
+
+class UserRole(str, Enum):
+    SUPERADMIN = "superadmin"
+    HOSPITAL_ADMIN = "hospital_admin"
+    STAFF = "staff"
+    PATIENT = "patient"
+
+# ─── Permission Models ────────────────────────────────────────────────────────
+
+class Permission(str, Enum):
+    CREATE_HOSPITAL = "create_hospital"
+    MANAGE_HOSPITAL = "manage_hospital"
+    ADD_STAFF = "add_staff"
+    ADD_PATIENT = "add_patient"
+    VIEW_PATIENT_DATA = "view_patient_data"
+    EDIT_PATIENT_DATA = "edit_patient_data"
+    ASSIGN_DEVICES = "assign_devices"
+    VIEW_IOT_STREAM = "view_iot_stream"
+
+
+
+# ─── Role Create Permission Models─────────────────────────────────────────────────────
+
+# What each role is allowed to create
+ROLE_CREATE_PERMISSIONS: dict[UserRole, list[UserRole]] = {
+    UserRole.SUPERADMIN:     [UserRole.SUPERADMIN, UserRole.HOSPITAL_ADMIN],
+    UserRole.HOSPITAL_ADMIN: [UserRole.STAFF, UserRole.PATIENT],
+    UserRole.STAFF:          [UserRole.PATIENT],   # staff can enroll patients
+    UserRole.PATIENT:        [],                    # patients cannot create users
+}
+
+# ─── Hospital Models ────────────────────────────────────────────────────────
+
+class Hospital(BaseModel):
+    hospital_id: str = Field(default_factory=lambda: f"hospital_{uuid.uuid4().hex[:12]}")
+    name: str
+    address: Optional[str] = None
+    created_by: str  # superadmin user_id
+    created_at: datetime
+
 class Vitals(BaseModel):
     heart_rate: int
     heart_rate_status: str
@@ -144,7 +195,8 @@ class User(BaseModel):
     email: str
     name: str
     picture: Optional[str] = None
-    role: str = "employee"  # admin or employee
+    role: UserRole
+    hospital_id: Optional[str] = None
     created_at: datetime
 
 class UserCreate(BaseModel):
@@ -152,7 +204,8 @@ class UserCreate(BaseModel):
     password: str
     email: str
     name: str
-    role: str = "employee"
+    role: UserRole  # superadmin | hospital_admin | staff | patient
+    hospital_id: Optional[str] = None
 
 class LoginRequest(BaseModel):
     username: str
@@ -397,7 +450,7 @@ def generate_dashboard_data():
     )
 
 
-#─────────────────────────────────────────── Helper function to hash password───────────────────────────────────────────
+#─── Helper function to hash password───────────────────────────────────────────
 def hash_password(password: str) -> str:
     salt = bcrypt.gensalt()
     return bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
@@ -410,6 +463,11 @@ def verify_password(password: str, hashed: str) -> bool:
 
 # Helper function to get user from token
 async def get_current_user(request: Request) -> User:
+
+    """
+    Reads session_token from cookie first, then Authorization header,
+    then ?token= query param (for WebSocket upgrade requests).
+    """
     # Check cookie first, then Authorization header as fallback
     session_token = request.cookies.get("session_token")
     if not session_token:
@@ -419,6 +477,9 @@ async def get_current_user(request: Request) -> User:
     
     if not session_token:
         raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
     
     # Find session
     session_doc = await db.user_sessions.find_one(
@@ -442,7 +503,7 @@ async def get_current_user(request: Request) -> User:
     # Get user
     user_doc = await db.users.find_one(
         {"user_id": session_doc["user_id"]},
-        {"_id": 0}
+        {"_id": 0, "password": 0}
     )
     
     if not user_doc:
@@ -453,6 +514,42 @@ async def get_current_user(request: Request) -> User:
         user_doc['created_at'] = datetime.fromisoformat(user_doc['created_at'])
     
     return User(**user_doc)
+
+
+# ─── RBAC Helper ──────────────────────────────────────────────────────────────
+
+class RoleChecker:
+    """
+    Dependency that enforces role access on a route.
+    Usage:
+        @router.get("/hospitals")
+        async def list_hospitals(user = Depends(RoleChecker([UserRole.SUPERADMIN]))):
+            ...
+    """
+    def __init__(self, allowed_roles: list[UserRole]):
+        self.allowed_roles = allowed_roles
+
+    async def __call__(self, request: Request) -> User:
+        user = await get_current_user(request)
+        if user.role not in self.allowed_roles:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Role '{user.role}' is not permitted for this action"
+            )
+        return user
+
+
+# Helper to ensure user belongs to the requested hospital
+def require_same_hospital(user: User, hospital_id: str):
+    """
+    For patients and admins: must belong to the same hospital.
+    Superadmins can access any hospital.
+    """
+    if user.role == UserRole.SUPERADMIN:
+        return
+    if user.hospital_id != hospital_id:
+        raise HTTPException(status_code=403, detail="You do not belong to this hospital")
+
 
 async def log_activity(user_id: str, user_name: str, action: str, entity_type: str, entity_name: str, description: str):
     activity_id = f"act_{uuid.uuid4().hex[:12]}"
@@ -506,7 +603,7 @@ def get_password_reset_email(user_name: str, reset_token: str):
 @api_router.post("/auth/register-admin")
 async def register_admin(admin_data: AdminRegister, response: Response):
     # Check if any admin exists
-    existing_admin = await db.users.find_one({"role": "admin"}, {"_id": 0})
+    existing_admin = await db.users.find_one({"role": UserRole.SUPERADMIN.value}, {"_id": 0})
     if existing_admin:
         raise HTTPException(status_code=400, detail="Admin already exists")
     
@@ -526,7 +623,7 @@ async def register_admin(admin_data: AdminRegister, response: Response):
         "email": admin_data.email,
         "name": admin_data.name,
         "picture": None,
-        "role": "admin",
+        "role": UserRole.SUPERADMIN.value,
         "created_at": now.isoformat()
     }
     
@@ -563,7 +660,7 @@ async def register_admin(admin_data: AdminRegister, response: Response):
     return User(**user_doc)
 
 
-# ─────────────────────────────────────────── Auth Routes/Login ───────────────────────────────────────────
+# ───────────── Auth Routes/Login ───────────────────────────────────────────
 @api_router.post("/auth/login")
 async def login(login_data: LoginRequest, response: Response):
     # Find user by username OR email
@@ -574,6 +671,7 @@ async def login(login_data: LoginRequest, response: Response):
         user_doc = await db.users.find_one({"email": login_data.username}, {"_id": 0})
     
     if not user_doc:
+
         raise HTTPException(status_code=401, detail="Invalid email/username or password")
     
     # Verify password
@@ -609,18 +707,41 @@ async def login(login_data: LoginRequest, response: Response):
     user_response = User(**user_doc).model_dump()
     user_response['session_token'] = session_token
     return user_response
-# ─────────────────────────────────────────── Auth Routes/Create User ───────────────────────────────────────────
+# ────── Auth Routes/Create User ───────────────────────────────────────────
 @api_router.post("/auth/create-user")
 async def create_team_member(user_data: UserCreate, request: Request):
     current_user = await get_current_user(request)
+
+    allowed_to_create = ROLE_CREATE_PERMISSIONS.get(current_user.role, [])
+    if user_data.role not in allowed_to_create:
+        raise HTTPException(status_code=403, detail=f"Role '{current_user.role}' cannot create users with role '{user_data.role}'")
     
-    if current_user.role != "admin":
-        raise HTTPException(status_code=403, detail="Only admin can create users")
-    
+    # Determine the hospital_id for the new user
+    if current_user.role == UserRole.SUPERADMIN:
+        # Superadmin must supply hospital_id when creating hospital_admin
+        if user_data.role == UserRole.HOSPITAL_ADMIN:
+            if not user_data.hospital_id:
+                raise HTTPException(status_code=400, detail="hospital_id is required when creating a hospital_admin")
+            # Verify the hospital exists
+            hospital = await db.hospitals.find_one({"hospital_id": user_data.hospital_id}, {"_id": 0})
+            if not hospital:
+                raise HTTPException(status_code=404, detail="Hospital not found")
+            target_hospital_id = user_data.hospital_id
+        else:
+            # Superadmin creating another superadmin — no hospital
+            target_hospital_id = None
+    else:
+        # hospital_admin / staff always create users in their OWN hospital
+        target_hospital_id = current_user.hospital_id
+        if not target_hospital_id:
+            raise HTTPException(status_code=400, detail="Your account has no hospital_id assigned")
+
     # Check if username exists
-    existing_user = await db.users.find_one({"username": user_data.username}, {"_id": 0})
-    if existing_user:
+    if await db.users.find_one({"username": user_data.username}, {"_id": 0}):
         raise HTTPException(status_code=400, detail="Username already taken")
+    
+    if await db.users.find_one({"email": user_data.email}, {"_id": 0}):
+        raise HTTPException(status_code=400, detail="Email already taken")
     
     # Create user
     user_id = f"user_{uuid.uuid4().hex[:12]}"
@@ -633,7 +754,8 @@ async def create_team_member(user_data: UserCreate, request: Request):
         "email": user_data.email,
         "name": user_data.name,
         "picture": None,
-        "role": user_data.role,
+        "role": user_data.role.value,
+        "hospital_id": target_hospital_id,
         "created_at": now.isoformat()
     }
     
@@ -644,11 +766,13 @@ async def create_team_member(user_data: UserCreate, request: Request):
     del user_doc['password']
     return User(**user_doc)
 
+# ───────────── Auth Routes/check-admin ───────────────────────────────────────────
 @api_router.get("/auth/check-admin")
 async def check_admin_exists():
-    admin = await db.users.find_one({"role": "admin"}, {"_id": 0})
+    admin = await db.users.find_one({"role": UserRole.SUPERADMIN.value}, {"_id": 0})
     return {"admin_exists": admin is not None}
 
+# ───────────── Auth Routes/change-password ───────────────────────────────────────────
 @api_router.post("/auth/change-password")
 async def change_password(request: Request):
     user = await get_current_user(request)
@@ -681,12 +805,13 @@ async def change_password(request: Request):
     
     return {"message": "Password changed successfully"}
 
+# ───────────── Auth Routes/admin-reset-password ──────────────────────────────
 @api_router.post("/auth/admin-reset-password")
 async def admin_reset_password(request: Request):
     current_user = await get_current_user(request)
     
-    if current_user.role != "admin":
-        raise HTTPException(status_code=403, detail="Only admins can reset passwords")
+    if current_user.role not in [UserRole.SUPERADMIN, UserRole.HOSPITAL_ADMIN]:
+        raise HTTPException(status_code=403, detail="Only hospital admins and superadmins can reset passwords")
     
     body = await request.json()
     target_user_id = body.get("user_id")
@@ -703,11 +828,15 @@ async def admin_reset_password(request: Request):
     if not target_user:
         raise HTTPException(status_code=404, detail="User not found")
     
+    # Hospital admin can only reset passwords within their own hospital
+    if current_user.role == UserRole.HOSPITAL_ADMIN:
+        if target_user.get("hospital_id") != current_user.hospital_id:
+            raise HTTPException(status_code=403, detail="Cannot reset password for a user in a different hospital")
+
     # Update password
-    new_hashed = hash_password(new_password)
     await db.users.update_one(
         {"user_id": target_user_id},
-        {"$set": {"password": new_hashed}}
+        {"$set": {"password": hash_password(new_password)}}
     )
     
     await log_activity(
@@ -721,14 +850,16 @@ async def admin_reset_password(request: Request):
     
     return {"message": f"Password reset successfully for {target_user['name']}"}
 
-
+# ───────────── Auth Routes/password-reset-request ──────────────────────────────
 # Password Reset Request - generates token for self-service reset
 class PasswordResetRequest(BaseModel):
     username: str
 
+
 class PasswordResetConfirm(BaseModel):
     token: str
     new_password: str
+
 
 @api_router.post("/auth/request-password-reset")
 async def request_password_reset(reset_request: PasswordResetRequest):
@@ -752,8 +883,8 @@ async def request_password_reset(reset_request: PasswordResetRequest):
         "user_id": user["user_id"],
         "username": user["username"],
         "token": reset_token,
-        "expires_at": expires_at.isoformat(),
-        "created_at": datetime.now(timezone.utc).isoformat()
+        "expires_at": expires_at,
+        "created_at": datetime.now(timezone.utc)
     })
     
     await log_activity(user["user_id"], user["name"], "requested", "password_reset", "Password Reset", f"Password reset requested for {user['username']}")
@@ -780,8 +911,10 @@ async def reset_password_with_token(reset_data: PasswordResetConfirm):
     if not reset_record:
         raise HTTPException(status_code=400, detail="Invalid or expired reset token")
     
-    # Check expiry
-    expires_at = datetime.fromisoformat(reset_record["expires_at"])
+    # Check expiry — handle both datetime objects and ISO strings (migration safety)
+    expires_at = reset_record["expires_at"]
+    if isinstance(expires_at, str):
+        expires_at = datetime.fromisoformat(expires_at)
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
     
@@ -821,7 +954,9 @@ async def get_pending_resets(request: Request):
     now = datetime.now(timezone.utc)
     result = []
     for reset in resets:
-        expires_at = datetime.fromisoformat(reset["expires_at"])
+        expires_at = reset["expires_at"]
+        if isinstance(expires_at, str):
+            expires_at = datetime.fromisoformat(expires_at)
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
         
@@ -876,19 +1011,20 @@ async def create_session(request: Request, response: Response):
             }}
         )
     else:
-        # Create new user
+        # Create_user
         user_id = f"user_{uuid.uuid4().hex[:12]}"
         
-        # Check if this is the first user - make them admin
+         # First OAuth user becomes superadmin, subsequent ones become patients
         user_count = await db.users.count_documents({})
-        default_role = "admin" if user_count == 0 else "employee"
+        default_role = UserRole.SUPERADMIN if user_count == 0 else UserRole.PATIENT
         
         await db.users.insert_one({
             "user_id": user_id,
             "email": user_data["email"],
             "name": user_data["name"],
             "picture": user_data.get("picture"),
-            "role": default_role,
+            "role": default_role.value,
+            "hospital_id": None,
             "created_at": datetime.now(timezone.utc).isoformat()
         })
     
@@ -912,11 +1048,74 @@ async def create_session(request: Request, response: Response):
     )
     
     # Get full user data
-    user_doc = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+    user_doc = await db.users.find_one({"user_id": user_id}, {"_id": 0, "password": 0})
     if isinstance(user_doc['created_at'], str):
         user_doc['created_at'] = datetime.fromisoformat(user_doc['created_at'])
     
     return User(**user_doc)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HOSPITAL ROUTES  (superadmin only)
+# ═══════════════════════════════════════════════════════════════════════════════
+ 
+# New hospital management endpoints
+@api_router.post("/hospitals")
+async def create_hospital(
+    hospital_data: HospitalCreate,
+    current_user: User = Depends(RoleChecker([UserRole.SUPERADMIN]))
+):
+    hospital_id = f"hospital_{uuid.uuid4().hex[:12]}"
+    now = datetime.now(timezone.utc)
+ 
+    doc = {
+        "hospital_id": hospital_id,
+        "name": hospital_data.name,
+        "address": hospital_data.address,
+        "created_by": current_user.user_id,   # set server-side, not from request body
+        "created_at": now.isoformat(),
+        "is_active": True
+    }
+    await db.hospitals.insert_one(doc)
+    await log_activity(
+        current_user.user_id, current_user.name,
+        "created", "hospital", hospital_data.name, f"Created hospital: {hospital_data.name}"
+    )
+    doc["created_at"] = now
+    return Hospital(**doc)
+ 
+ 
+@api_router.get("/hospitals")
+async def list_hospitals(
+    current_user: User = Depends(RoleChecker([UserRole.SUPERADMIN]))
+):
+    hospitals = await db.hospitals.find({}, {"_id": 0}).to_list(1000)
+    for h in hospitals:
+        if isinstance(h.get("created_at"), str):
+            h["created_at"] = datetime.fromisoformat(h["created_at"])
+    return hospitals
+
+ 
+@api_router.get("/hospitals/{hospital_id}")
+async def get_hospital(hospital_id: str, request: Request):
+    current_user = await get_current_user(request)
+    require_same_hospital(current_user, hospital_id)
+ 
+    hospital = await db.hospitals.find_one({"hospital_id": hospital_id}, {"_id": 0})
+    if not hospital:
+        raise HTTPException(status_code=404, detail="Hospital not found")
+    if isinstance(hospital.get("created_at"), str):
+        hospital["created_at"] = datetime.fromisoformat(hospital["created_at"])
+    return hospital
+ 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# USER MANAGEMENT ROUTES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# get_users is now role-aware
+#  - superadmin sees all users (optionally filtered by hospital_id query param)
+#  - hospital_admin and staff see only their hospital's users
 
 @api_router.get("/auth/me", response_model=User)
 async def get_me(request: Request):
@@ -924,7 +1123,12 @@ async def get_me(request: Request):
 
 @api_router.post("/auth/logout")
 async def logout(request: Request, response: Response):
+    # Check cookie first, then Authorization header (matches cross-domain auth pattern)
     session_token = request.cookies.get("session_token")
+    if not session_token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            session_token = auth_header.replace("Bearer ", "")
     if session_token:
         await db.user_sessions.delete_one({"session_token": session_token})
     
@@ -934,50 +1138,122 @@ async def logout(request: Request, response: Response):
 
 # ─────── User Management Routes (Admin only) ─────────────
 @api_router.get("/users", response_model=List[User])
-async def get_users(request: Request):
-    user = await get_current_user(request)
+async def get_users(
+    request: Request,
+    hospital_id: Optional[str] = None
+):
+    current_user = await get_current_user(request)
     
-    if user.role != "admin":
+    if current_user.role == UserRole.SUPERADMIN:
+        query = {"hospital_id": hospital_id} if hospital_id else {}
+    elif current_user.role == UserRole.HOSPITAL_ADMIN or current_user.role == UserRole.STAFF:
+        query = {"hospital_id": current_user.hospital_id}
+    else:
         raise HTTPException(status_code=403, detail="Only admins can view all users")
-    
-    users = await db.users.find({}, {"_id": 0}).to_list(1000)
+        
+    users = await db.users.find(query, {"_id": 0, "password": 0}).to_list(1000)
     
     # Convert datetime strings
     for u in users:
-        if isinstance(u['created_at'], str):
+        if isinstance(u.get('created_at'), str):
             u['created_at'] = datetime.fromisoformat(u['created_at'])
     
     return users
 
 
-# ─── REST API Endpoints ────────────────────────────────────────────────────────
+ 
+@api_router.get("/users/{user_id}", response_model=User)
+async def get_user(user_id: str, request: Request):
+    current_user = await get_current_user(request)
+ 
+    # Patients can only fetch their own record
+    if current_user.role == UserRole.PATIENT and current_user.user_id != user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+ 
+    user_doc = await db.users.find_one({"user_id": user_id}, {"_id": 0, "password": 0})
+    if not user_doc:
+        raise HTTPException(status_code=404, detail="User not found")
+ 
+    # Hospital-scoped roles can only see users in their hospital
+    if current_user.role in [UserRole.HOSPITAL_ADMIN, UserRole.STAFF]:
+        if user_doc.get("hospital_id") != current_user.hospital_id:
+            raise HTTPException(status_code=403, detail="Access denied: different hospital")
+ 
+    if isinstance(user_doc.get('created_at'), str):
+        user_doc['created_at'] = datetime.fromisoformat(user_doc['created_at'])
+    return User(**user_doc)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DASHBOARD & REST ENDPOINTS
+# ═══════════════════════════════════════════════════════════════════════════════
+ 
 
 @api_router.get("/")
 async def root():
     return {"message": "VitalSync Health Monitoring API"}
 
 @api_router.get("/dashboard")
-async def get_dashboard():
+async def get_dashboard(request: Request):
+
+    await get_current_user(request)
     data = generate_dashboard_data()
     return data.model_dump()
 
 @api_router.get("/patients")
-async def get_patients():
-    return [
-        {
-            "id": "patient-001",
-            "name": "Mary Johnson",
-            "room": "Room 102",
-            "age": 72,
-            "status": "Sleeping"
-        }
-    ]
+async def get_patients(request: Request):
+    current_user = await get_current_user(request)
+    # Patients can only see their own record; others see hospital-scoped list
+    if current_user.role == UserRole.PATIENT:
+        patients = await db.users.find(
+            {"user_id": current_user.user_id, "role": UserRole.PATIENT.value},
+            {"_id": 0, "password": 0}
+        ).to_list(1)
+    elif current_user.role == UserRole.SUPERADMIN:
+        patients = await db.users.find(
+            {"role": UserRole.PATIENT.value},
+            {"_id": 0, "password": 0}
+        ).to_list(1000)
+    else:
+        # hospital_admin / staff — scoped to their hospital
+        patients = await db.users.find(
+            {"role": UserRole.PATIENT.value, "hospital_id": current_user.hospital_id},
+            {"_id": 0, "password": 0}
+        ).to_list(1000)
+    # Normalise created_at before returning
+    for p in patients:
+        if isinstance(p.get("created_at"), str):
+            p["created_at"] = datetime.fromisoformat(p["created_at"])
+    return patients
 
 
 # ─── WebSocket Endpoint ────────────────────────────────────────────────────────
 
 @api_router.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(default=None)):
+    if not token:
+        await websocket.close(code=4001, reason="Missing auth token")
+        return
+    
+    if db is None:
+        await websocket.close(code=4001, reason="Database unavailable")
+        return
+
+    session_doc = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
+    if not session_doc:
+        await websocket.close(code=4001, reason="Invalid token")
+        return
+ 
+    expires_at = session_doc.get("expires_at")
+    if isinstance(expires_at, str):
+        expires_at = datetime.fromisoformat(expires_at)
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at < datetime.now(timezone.utc):
+        await websocket.close(code=4001, reason="Token expired")
+        return
+
+    # Auth passed — accept and stream
     await manager.connect(websocket)
     try:
         initial_data = generate_dashboard_data()
@@ -993,7 +1269,10 @@ async def websocket_endpoint(websocket: WebSocket):
         logger.error(f"WebSocket error: {e}")
         manager.disconnect(websocket)
 
-# ─── Middleware & Router ───────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════
+# MIDDLEWARE & STARTUP
+# ═════════════════════════════════════════════════════════════════════════
+ 
 
 app.add_middleware(
     CORSMiddleware,
@@ -1005,9 +1284,24 @@ app.add_middleware(
 
 app.include_router(api_router)
 
-# ─── Shutdown ──────────────────────────────────────────────────────────────────
+@app.on_event("startup")
+async def create_indexes():
+    """Create MongoDB Indexes for performance. """
+    if db is None:
+        return
+
+    try:
+        await db.users.create_index("email", unique=True)
+        await db.users.create_index([("hospital_id", 1), ("role", 1)])
+        await db.user_sessions.create_index("session_token", unique=True)
+        await db.user_sessions.create_index("expires_at", expireAfterSeconds=0)  # TTL index
+        await db.hospitals.create_index("hospital_id", unique=True)
+        logger.info("MongoDB indexes created")
+    except Exception as e:
+        logger.error(f"Error creating indexes: {e}")
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
     if client:
         client.close()
+      
