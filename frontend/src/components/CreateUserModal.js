@@ -9,6 +9,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { authFetch } from "@/utils/authFetch";
 import { useAuth } from "@/context/AuthContext";
+import { emailError, passwordError, requiredError, firstError } from "@/utils/validation";
 import { usePermissions } from "@/hooks/usePermissions";
 import { CREATABLE_ROLES, ROLE_META, ROLES } from "@/constants/roles";
 import {
@@ -41,12 +42,15 @@ export function CreateUserModal({ open, onClose, onCreated }) {
 
   // ─── Submit ───────────────────────────────────────────────────────────────
   const handleSubmit = async () => {
-    if (!form.username || !form.password || !form.email || !form.name || !form.role) {
-      toast.error("All fields are required");
-      return;
-    }
-    if (form.password.length < 6) {
-      toast.error("Password must be at least 6 characters");
+    const err = firstError(
+      requiredError(form.name, "Full name"),
+      emailError(form.email),
+      requiredError(form.username, "Username"),
+      passwordError(form.password),
+      requiredError(form.role, "Role"),
+    );
+    if (err) {
+      toast.error(err);
       return;
     }
     // Superadmin creating hospital_admin must supply a hospital_id

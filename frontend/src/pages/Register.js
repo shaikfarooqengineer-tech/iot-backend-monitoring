@@ -9,6 +9,7 @@ import { useNavigate, Link } from "react-router-dom";
 import { toast } from "sonner";
 import { authFetch } from "@/utils/authFetch";
 import { useAuth } from "@/context/AuthContext";
+import { emailError, passwordError, confirmPasswordError, requiredError, firstError } from "@/utils/validation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -58,16 +59,16 @@ export default function Register() {
     e.preventDefault();
 
     // Client-side validation
-    if (!form.company_name || !form.name || !form.email || !form.username || !form.password) {
-      toast.error("All fields are required");
-      return;
-    }
-    if (form.password.length < 6) {
-      toast.error("Password must be at least 6 characters");
-      return;
-    }
-    if (form.password !== form.confirm_password) {
-      toast.error("Passwords do not match");
+    const err = firstError(
+      requiredError(form.company_name, "Company / Hospital name"),
+      requiredError(form.name, "Full name"),
+      emailError(form.email),
+      requiredError(form.username, "Username"),
+      passwordError(form.password),
+      confirmPasswordError(form.password, form.confirm_password),
+    );
+    if (err) {
+      toast.error(err);
       return;
     }
 

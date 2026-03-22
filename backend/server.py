@@ -197,6 +197,7 @@ class User(BaseModel):
     picture: Optional[str] = None
     role: UserRole
     hospital_id: Optional[str] = None
+    can_create_patients: bool = True
     created_at: datetime
 
 class UserCreate(BaseModel):
@@ -206,6 +207,48 @@ class UserCreate(BaseModel):
     name: str
     role: UserRole  # superadmin | hospital_admin | staff | patient
     hospital_id: Optional[str] = None
+    can_create_patients: bool = True
+
+# ─── Staff Permission Update ──────────────────────────────────────────────────
+class StaffPermissionUpdate(BaseModel):
+    can_create_patients: bool
+
+# ─── Patient Creation (dedicated endpoint) ────────────────────────────────────
+class PatientCreate(BaseModel):
+    username: str
+    password: str
+    email: str
+    name: str
+    room: Optional[str] = None
+    age: Optional[int] = None
+    status: str = "Admitted"
+
+# ─── User / Patient Update (partial) ─────────────────────────────────────────
+class UserUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    username: Optional[str] = None
+    picture: Optional[str] = None
+
+class PatientUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    username: Optional[str] = None
+    room: Optional[str] = None
+    age: Optional[int] = None
+    status: Optional[str] = None
+
+# ─── Device Models ─────────────────────────────────────────────────────────────
+class DeviceCreate(BaseModel):
+    device_serial: str
+    device_type: str = "sleep_monitor"
+    firmware_version: Optional[str] = None
+
+class DeviceAssign(BaseModel):
+    hospital_id: str
+
+class DeviceAssignToPatient(BaseModel):
+    patient_id: str
 
 class LoginRequest(BaseModel):
     username: str
@@ -715,6 +758,17 @@ async def create_team_member(user_data: UserCreate, request: Request):
     allowed_to_create = ROLE_CREATE_PERMISSIONS.get(current_user.role, [])
     if user_data.role not in allowed_to_create:
         raise HTTPException(status_code=403, detail=f"Role '{current_user.role}' cannot create users with role '{user_data.role}'")
+
+    # Staff creating patients: check can_create_patients permission
+    if current_user.role == UserRole.STAFF and user_data.role == UserRole.PATIENT:
+        staff_doc = await db.users.find_one(
+            {"user_id": current_user.user_id}, {"_id": 0, "can_create_patients": 1}
+        )
+        if staff_doc and staff_doc.get("can_create_patients") is False:
+            raise HTTPException(
+                status_code=403,
+                detail="You have not been granted permission to create patient accounts. Contact your hospital admin."
+            )
     
     # Determine the hospital_id for the new user
     if current_user.role == UserRole.SUPERADMIN:

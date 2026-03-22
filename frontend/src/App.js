@@ -28,6 +28,8 @@ import HospitalManagement    from "@/pages/HospitalManagement";
 import UserManagement        from "@/pages/UserManagement";
 import PatientList           from "@/pages/PatientList";
 import PatientView           from "@/pages/PatientView";
+import PatientMonitor        from "@/pages/PatientMonitor";
+import Devices               from "@/pages/Devices";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 
@@ -119,6 +121,20 @@ function AppRouter() {
         <Route path="/users" element={
           <AdminShell title="Users">
             <UserManagement />
+          </AdminShell>
+        } />
+
+        {/* Patient Monitor (admin + staff) */}
+        <Route path="/monitor/:patientId" element={
+          <AdminShell title="Patient Monitor">
+            <PatientMonitor />
+          </AdminShell>
+        } />
+
+        {/* Devices (superadmin + hospital_admin) */}
+        <Route path="/devices" element={
+          <AdminShell title="Devices">
+            <Devices />
           </AdminShell>
         } />
       </Route>
