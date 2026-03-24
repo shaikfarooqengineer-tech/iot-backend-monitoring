@@ -13,7 +13,7 @@ class HealthDashboardTester:
         self.tests_passed = 0
         self.ws_messages_received = 0
         self.ws_data = None
-
+        
     def run_test(self, name, method, endpoint, expected_status, data=None):
         """Run a single API test"""
         url = f"{self.base_url}/{endpoint}"
