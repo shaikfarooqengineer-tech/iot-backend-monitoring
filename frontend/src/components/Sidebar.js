@@ -308,7 +308,7 @@ export function Sidebar({ onNavigate, onClose }) {
                   : "opacity-100 w-auto max-w-[160px]"}
               `}
             >
-              Sign out
+              Logout
             </span>
           </button>
         </div>
