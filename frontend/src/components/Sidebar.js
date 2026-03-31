@@ -20,12 +20,12 @@ import { RoleBadge } from "@/components/RoleBadge";
 
 // ─── Icon map ────────────────────────────────────────────────────────────────
 const NAV_ICONS = {
-  "/hospitals":  Building2,
-  "/dashboard":  LayoutDashboard,
-  "/patients":   UserCircle,
-  "/users":      Users,
-  "/devices":    Cpu,
-  "/my-health":  Activity,
+  "/hospitals": Building2,
+  "/dashboard": LayoutDashboard,
+  "/patients": UserCircle,
+  "/users": Users,
+  "/devices": Cpu,
+  "/my-health": Activity,
 };
 
 // ─── Mini toast hook ─────────────────────────────────────────────────────────
@@ -36,12 +36,12 @@ function useHoverToast() {
   const showToast = useCallback((label, anchorEl) => {
     if (!anchorEl) return;
     const rect = anchorEl.getBoundingClientRect();
-    const id   = Date.now();
+    const id = Date.now();
 
     setToasts(prev => [...prev, {
       id,
       label,
-      top:  rect.top  + rect.height / 2,
+      top: rect.top + rect.height / 2,
       left: rect.right + 10,
     }]);
 
@@ -89,7 +89,7 @@ function ToastLayer({ toasts }) {
 // onClose    — provided only on mobile; X closes the drawer instead of collapsing
 export function Sidebar({ onNavigate, onClose }) {
   const { user, logout } = useAuth();
-  const { role, can }    = usePermissions();
+  const { role, can } = usePermissions();
 
   const [isCollapsed, setIsCollapsed] = useState(false);
   const { toasts, showToast, clearToastsFor } = useHoverToast();
@@ -98,8 +98,8 @@ export function Sidebar({ onNavigate, onClose }) {
   const isMobile = !!onClose;
 
   const visibleNav = NAV_ITEMS.filter(item => {
-    if (item.roles      && !item.roles.includes(role))  return false;
-    if (item.permission && !can(item.permission))        return false;
+    if (item.roles && !item.roles.includes(role)) return false;
+    if (item.permission && !can(item.permission)) return false;
     return true;
   });
 

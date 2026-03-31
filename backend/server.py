@@ -647,8 +647,8 @@ def get_password_reset_email(user_name: str, reset_token: str):
 async def register_admin(admin_data: AdminRegister, response: Response):
     # Check if any admin exists
     existing_admin = await db.users.find_one({"role": UserRole.SUPERADMIN.value}, {"_id": 0})
-    if existing_admin:
-        raise HTTPException(status_code=400, detail="Admin already exists")
+    # if existing_admin:
+    #     raise HTTPException(status_code=400, detail="Admin already exists")
     
     # Check if username exists
     existing_user = await db.users.find_one({"username": admin_data.username}, {"_id": 0})
@@ -659,6 +659,10 @@ async def register_admin(admin_data: AdminRegister, response: Response):
     user_id = f"user_{uuid.uuid4().hex[:12]}"
     now = datetime.now(timezone.utc)
     
+    existing_admin = await db.users.find_one(
+    {"role": UserRole.SUPERADMIN.value}
+)
+
     user_doc = {
         "user_id": user_id,
         "username": admin_data.username,
@@ -667,7 +671,8 @@ async def register_admin(admin_data: AdminRegister, response: Response):
         "name": admin_data.name,
         "picture": None,
         "role": UserRole.SUPERADMIN.value,
-        "created_at": now.isoformat()
+        "created_at": now.isoformat(),
+        "is_default": True if not existing_admin else False
     }
     
     await db.users.insert_one(user_doc)
@@ -1215,7 +1220,35 @@ async def get_users(
     return users
 
 
+# ─────── User Management delete user ─────────────
+@api_router.delete("/users/{user_id}")
+async def delete_user(user_id: str, request: Request):
+    current_user = await get_current_user(request)
+
+    if current_user.role not in [UserRole.SUPERADMIN, UserRole.HOSPITAL_ADMIN]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    user = await db.users.find_one({"user_id": user_id})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # 🚫 Block default superadmin
+    if user.get("is_default"):
+        raise HTTPException(
+            status_code=403,
+            detail="Default Super Admin cannot be deleted"
+        )
+
+    if current_user.role == UserRole.HOSPITAL_ADMIN:
+        if user.get("hospital_id") != current_user.hospital_id:
+            raise HTTPException(status_code=403, detail="Different hospital")
+
+    await db.users.delete_one({"user_id": user_id})
+
+    return {"message": "User deleted successfully"}
+
  
+# ─────── User Management delete user ─────────────
 @api_router.get("/users/{user_id}", response_model=User)
 async def get_user(user_id: str, request: Request):
     current_user = await get_current_user(request)
@@ -1237,6 +1270,29 @@ async def get_user(user_id: str, request: Request):
         user_doc['created_at'] = datetime.fromisoformat(user_doc['created_at'])
     return User(**user_doc)
 
+
+# ─────── Update Permissions ─────────────
+@api_router.patch("/users/{user_id}/permissions")
+async def update_permissions(user_id: str, data: StaffPermissionUpdate, request: Request):
+    current_user = await get_current_user(request)
+
+    if current_user.role not in [UserRole.SUPERADMIN, UserRole.HOSPITAL_ADMIN]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    user = await db.users.find_one({"user_id": user_id})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if current_user.role == UserRole.HOSPITAL_ADMIN:
+        if user.get("hospital_id") != current_user.hospital_id:
+            raise HTTPException(status_code=403, detail="Different hospital")
+
+    await db.users.update_one(
+        {"user_id": user_id},
+        {"$set": {"can_create_patients": data.can_create_patients}}
+    )
+
+    return {"message": "Permissions updated"}
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # DASHBOARD & REST ENDPOINTS
