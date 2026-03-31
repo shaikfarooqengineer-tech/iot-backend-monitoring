@@ -1215,6 +1215,26 @@ async def get_users(
     return users
 
 
+# ─────── User Management delete user ─────────────
+@api_router.delete("/users/{user_id}")
+async def delete_user(user_id: str, request: Request):
+    current_user = await get_current_user(request)
+
+    if current_user.role not in [UserRole.SUPERADMIN, UserRole.HOSPITAL_ADMIN]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    user = await db.users.find_one({"user_id": user_id})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if current_user.role == UserRole.HOSPITAL_ADMIN:
+        if user.get("hospital_id") != current_user.hospital_id:
+            raise HTTPException(status_code=403, detail="Different hospital")
+
+    await db.users.delete_one({"user_id": user_id})
+
+    return {"message": "User deleted successfully"}
+
  
 @api_router.get("/users/{user_id}", response_model=User)
 async def get_user(user_id: str, request: Request):
@@ -1237,6 +1257,29 @@ async def get_user(user_id: str, request: Request):
         user_doc['created_at'] = datetime.fromisoformat(user_doc['created_at'])
     return User(**user_doc)
 
+
+# ─────── Update Permissions ─────────────
+@api_router.patch("/users/{user_id}/permissions")
+async def update_permissions(user_id: str, data: StaffPermissionUpdate, request: Request):
+    current_user = await get_current_user(request)
+
+    if current_user.role not in [UserRole.SUPERADMIN, UserRole.HOSPITAL_ADMIN]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    user = await db.users.find_one({"user_id": user_id})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if current_user.role == UserRole.HOSPITAL_ADMIN:
+        if user.get("hospital_id") != current_user.hospital_id:
+            raise HTTPException(status_code=403, detail="Different hospital")
+
+    await db.users.update_one(
+        {"user_id": user_id},
+        {"$set": {"can_create_patients": data.can_create_patients}}
+    )
+
+    return {"message": "Permissions updated"}
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # DASHBOARD & REST ENDPOINTS
