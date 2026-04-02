@@ -22,13 +22,15 @@ import { useAuth } from "@/context/AuthContext";
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 
 export default function PatientMonitor() {
-  const { patientId } = useParams();
+  const { patientId: patientIdParam } = useParams();
   const navigate = useNavigate();
   const { user } = useAuth();
+  const patientId = patientIdParam || user?.user_id;
 
   const [dashboardData, setDashboardData] = useState(null);
   const [isConnected,   setIsConnected]   = useState(false);
   const [lastUpdate,    setLastUpdate]    = useState(null);
+  const [wsError,       setWsError]       = useState(null);
 
   const wsRef               = useRef(null);
   const reconnectTimeoutRef = useRef(null);
@@ -57,13 +59,16 @@ export default function PatientMonitor() {
   }, [user, patientId]);
 
   useEffect(() => {
-    if (!user) return;
+    if (!user || !patientId) {
+      console.log("Waiting for user or patientId:", { user: !!user, patientId });
+      return;
+    }
     connectWebSocket();
     return () => {
       wsRef.current?.close();
       if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
     };
-  }, [connectWebSocket, user]);
+  }, [connectWebSocket, user, patientId]);
 
   if (!dashboardData) {
     return (
@@ -71,6 +76,8 @@ export default function PatientMonitor() {
         <div className="text-center">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4" />
           <p className="text-slate-600 font-medium">Connecting to patient monitor…</p>
+          {wsError && <p className="text-red-500 mt-2">{wsError}</p>}
+          <p className="text-sm text-slate-500 mt-2">Patient ID: {patientId}</p>
         </div>
       </div>
     );
@@ -79,7 +86,7 @@ export default function PatientMonitor() {
   const { patient, vitals, room_status, device_status, alerts, sleep_quality, activity_level, heart_rate_history, respiration_history } = dashboardData;
 
   return (
-    <div className="p-6 max-w-[1800px] mx-auto space-y-6">
+    <div className="space-y-6">
       {/* Back + Header */}
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div className="flex items-center gap-3">

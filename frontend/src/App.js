@@ -27,7 +27,6 @@ import Unauthorized          from "@/pages/Unauthorized";
 import HospitalManagement    from "@/pages/HospitalManagement";
 import UserManagement        from "@/pages/UserManagement";
 import PatientList           from "@/pages/PatientList";
-import PatientView           from "@/pages/PatientView";
 import PatientMonitor        from "@/pages/PatientMonitor";
 import Devices               from "@/pages/Devices";
 
@@ -145,7 +144,7 @@ function AppRouter() {
       }>
         <Route path="/my-health" element={
           <PatientShell>
-            <PatientView />
+            <PatientMonitor />
           </PatientShell>
         } />
       </Route>
