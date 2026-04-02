@@ -20,8 +20,8 @@ import { RoleBadge } from "@/components/RoleBadge";
 
 // ─── Icon map ────────────────────────────────────────────────────────────────
 const NAV_ICONS = {
-  "/hospitals": Building2,
   "/dashboard": LayoutDashboard,
+  "/hospitals": Building2,
   "/patients": UserCircle,
   "/users": Users,
   "/devices": Cpu,

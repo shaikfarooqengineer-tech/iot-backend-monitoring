@@ -68,8 +68,8 @@ export const ROLE_META = {
 
 // ─── Navigation items (Sidebar filters this list by role/permission) ─────────
 export const NAV_ITEMS = [
-  { label: "Hospitals",       href: "/hospitals",  roles: [ROLES.SUPERADMIN] },
   { label: "Dashboard",       href: "/dashboard",  roles: [ROLES.SUPERADMIN, ROLES.HOSPITAL_ADMIN, ROLES.STAFF] },
+  { label: "Hospitals",       href: "/hospitals",  roles: [ROLES.SUPERADMIN] },
   { label: "Patients",        href: "/patients",   roles: [ROLES.SUPERADMIN, ROLES.HOSPITAL_ADMIN, ROLES.STAFF] },
   { label: "User management", href: "/users",      roles: [ROLES.SUPERADMIN, ROLES.HOSPITAL_ADMIN] },
   { label: "Devices",         href: "/devices",    permission: PERMISSIONS.ASSIGN_DEVICES },
@@ -77,8 +77,8 @@ export const NAV_ITEMS = [
 
 // ─── Role → home page after login ───────────────────────────────────────────
 export const ROLE_HOME = {
-  [ROLES.SUPERADMIN]:     "/hospitals",
   [ROLES.HOSPITAL_ADMIN]: "/dashboard",
+  [ROLES.SUPERADMIN]:     "/hospitals",
   [ROLES.STAFF]:          "/dashboard",
   [ROLES.PATIENT]:        "/my-health",
 };
