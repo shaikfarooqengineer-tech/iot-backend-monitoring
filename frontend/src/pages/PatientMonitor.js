@@ -86,7 +86,7 @@ export default function PatientMonitor() {
   const { patient, vitals, room_status, device_status, alerts, sleep_quality, activity_level, heart_rate_history, respiration_history } = dashboardData;
 
   return (
-    <div className="space-y-6">
+    <div className="p-6 max-w-[1800px] mx-auto space-y-6">
       {/* Back + Header */}
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div className="flex items-center gap-3">
