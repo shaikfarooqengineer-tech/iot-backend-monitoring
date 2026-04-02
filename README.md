@@ -22,9 +22,14 @@ This system provides a live dashboard for monitoring patient vitals (heart rate,
    ```bash
    cd backend
    ```
-2. Create and activate a virtual environment:
+2. Create a virtual environment named 'venv' & it will run only when you are doing project setup for first time.
    ```bash
    python -m venv venv
+   ```
+
+   This command will activate the virtual environment named 'venv' in the current backend directory.
+   
+   ```bash
    .\venv\Scripts\activate
    ```
 3. Install dependencies:
