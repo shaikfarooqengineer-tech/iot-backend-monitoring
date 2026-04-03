@@ -16,9 +16,9 @@ import { Label } from "@/components/ui/label";
 
 export default function HospitalManagement() {
   const [hospitals, setHospitals] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [form, setForm] = useState({ name: "", address: "" });
-  const [creating, setCreating] = useState(false);
+  const [loading,   setLoading]   = useState(true);
+  const [form,      setForm]      = useState({ name: "", address: "" });
+  const [creating,  setCreating]  = useState(false);
 
   // ─── Load hospitals ───────────────────────────────────────────────────────
   useEffect(() => {
@@ -28,7 +28,7 @@ export default function HospitalManagement() {
         if (res.ok) setHospitals(await res.json());
         else toast.error("Failed to load hospitals");
       } catch { toast.error("Network error"); }
-      finally { setLoading(false); }
+      finally  { setLoading(false); }
     };
     load();
   }, []);
@@ -39,9 +39,9 @@ export default function HospitalManagement() {
     setCreating(true);
     try {
       const res = await authFetch(`${process.env.REACT_APP_BACKEND_URL}/api/hospitals`, {
-        method: "POST",
+        method:  "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(form),
+        body:    JSON.stringify(form),
       });
       if (res.ok) {
         const h = await res.json();
@@ -59,7 +59,7 @@ export default function HospitalManagement() {
         }
       }
     } catch { toast.error("Network error"); }
-    finally { setCreating(false); }
+    finally  { setCreating(false); }
   };
 
   // ─── Copy hospital_id to clipboard ───────────────────────────────────────
@@ -67,29 +67,6 @@ export default function HospitalManagement() {
     navigator.clipboard.writeText(id);
     toast.success("Hospital ID copied");
   };
-
-  // ─── Delete hospital ──────────────────────────────────────────────────────
-  const deleteHospital = async (id) => {
-    if (!window.confirm("Are you sure you want to delete this hospital?")) return;
-
-    try {
-      const res = await authFetch(
-        `${process.env.REACT_APP_BACKEND_URL}/api/hospitals/${id}`,
-        { method: "DELETE" }
-      );
-
-      if (res.ok) {
-        setHospitals(prev => prev.filter(h => h.hospital_id !== id));
-        toast.success("Hospital deleted");
-      } else {
-        const err = await res.json().catch(() => ({ detail: "Delete failed" }));
-        toast.error(err.detail);
-      }
-    } catch {
-      toast.error("Network error");
-    }
-  };
-
 
   return (
     <div className="p-6 max-w-4xl mx-auto space-y-6">
@@ -107,7 +84,7 @@ export default function HospitalManagement() {
               <Label>Hospital name *</Label>
               <Input
                 value={form.name}
-                onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
+                onChange={e => setForm(f => ({...f, name: e.target.value}))}
                 placeholder="City General Hospital"
               />
             </div>
@@ -115,7 +92,7 @@ export default function HospitalManagement() {
               <Label>Address (optional)</Label>
               <Input
                 value={form.address}
-                onChange={e => setForm(f => ({ ...f, address: e.target.value }))}
+                onChange={e => setForm(f => ({...f, address: e.target.value}))}
                 placeholder="123 Medical Drive"
               />
             </div>
@@ -160,31 +137,11 @@ export default function HospitalManagement() {
                       </button>
                     </div>
                   </div>
-
-
-                  {/*<span className={`flex-shrink-0 text-xs px-2 py-0.5 rounded-full font-medium ${
+                  <span className={`flex-shrink-0 text-xs px-2 py-0.5 rounded-full font-medium ${
                     h.is_active ? "bg-green-100 text-green-700" : "bg-slate-100 text-slate-500"
                   }`}>
                     {h.is_active ? "Active" : "Inactive"}
-                  </span>*/}
-
-
-                  <div className="flex items-center gap-3">
-                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${h.is_active ? "bg-green-100 text-green-700" : "bg-slate-100 text-slate-500"
-                      }`}>
-                      {h.is_active ? "Active" : "Inactive"}
-                    </span>
-
-                    <Button
-                      variant="destructive"
-                      size="sm"
-                      onClick={() => deleteHospital(h.hospital_id)}
-                    >
-                      Delete
-                    </Button>
-                  </div>
-
-
+                  </span>
                 </div>
               ))}
             </div>
