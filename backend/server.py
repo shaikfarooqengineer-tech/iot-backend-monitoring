@@ -1337,59 +1337,131 @@ async def get_patients(request: Request):
     return patients
 
 
+# ─── HTTP Polling Endpoint (fallback for Vercel / serverless where WS is unsupported) ───
+# Frontend uses this when WebSocket fails (e.g., Vercel serverless = no persistent conn).
+# Returns the same DashboardData shape as the WebSocket messages.
+@api_router.get("/dashboard-stream")
+async def get_dashboard_stream(request: Request):
+    """
+    Polling fallback: identical payload to WebSocket messages.
+    Call every 3 s from the frontend when WebSocket is unavailable.
+    Auth: Bearer token in Authorization header (same as all other REST endpoints).
+    """
+    await get_current_user(request)  # raises 401/403 if invalid
+    data = generate_dashboard_data()
+    return data.model_dump()
+
+
 # ─── WebSocket Endpoint ────────────────────────────────────────────────────────
+# NOTE: This endpoint works perfectly on local uvicorn and proper ASGI servers.
+# On Vercel Serverless Functions it will NOT work because Lambda terminates after
+# the HTTP response — use /api/dashboard-stream for Vercel deployments.
 
 @api_router.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(default=None)):
+async def websocket_endpoint(
+    websocket: WebSocket,
+    token: Optional[str] = Query(default=None),
+    patient_id: Optional[str] = Query(default=None),  # accepted but currently unused; data is mocked
+):
+    """
+    WebSocket real-time stream.
+    Query params:
+      ?token=<session_token>    — required for authentication
+      ?patient_id=<user_id>     — optional; used to scope future per-patient data
+    """
+    logger.info(f"WS handshake: patient_id={patient_id} token={'***' if token else 'MISSING'}")
+
     if not token:
+        logger.warning("WS rejected: missing token")
         await websocket.close(code=4001, reason="Missing auth token")
         return
-    
+
     if db is None:
-        await websocket.close(code=4001, reason="Database unavailable")
+        logger.error("WS rejected: database unavailable")
+        await websocket.close(code=4003, reason="Database unavailable")
         return
 
+    # Validate session token
     session_doc = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
     if not session_doc:
+        logger.warning("WS rejected: invalid token")
         await websocket.close(code=4001, reason="Invalid token")
         return
- 
+
     expires_at = session_doc.get("expires_at")
     if isinstance(expires_at, str):
         expires_at = datetime.fromisoformat(expires_at)
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
     if expires_at < datetime.now(timezone.utc):
+        logger.warning("WS rejected: token expired")
         await websocket.close(code=4001, reason="Token expired")
         return
 
-    # Auth passed — accept and stream
+    # Auth passed — accept and stream continuously
+    logger.info(f"WS accepted for user_id={session_doc.get('user_id')} patient_id={patient_id}")
     await manager.connect(websocket)
     try:
+        # Send initial snapshot immediately so UI renders without waiting 3 s
         initial_data = generate_dashboard_data()
         await websocket.send_json(initial_data.model_dump())
+        logger.info("WS: sent initial dashboard snapshot")
 
         while True:
             await asyncio.sleep(3)
             data = generate_dashboard_data()
             await websocket.send_json(data.model_dump())
     except WebSocketDisconnect:
+        logger.info(f"WS: client disconnected (patient_id={patient_id})")
         manager.disconnect(websocket)
     except Exception as e:
-        logger.error(f"WebSocket error: {e}")
+        logger.error(f"WS stream error: {e}")
         manager.disconnect(websocket)
 
 # ═════════════════════════════════════════════════════════════════════════
 # MIDDLEWARE & STARTUP
 # ═════════════════════════════════════════════════════════════════════════
- 
+
+# ─── CORS Configuration ───────────────────────────────────────────────────────
+# CRITICAL RULES:
+#  1. allow_credentials=True is INCOMPATIBLE with allow_origins=["*"].
+#     Using "*" with credentials raises a ValueError at startup → no CORS headers
+#     at all → every cross-domain request (including WS upgrades) is blocked.
+#  2. Always list origins explicitly when credentials are required.
+#  3. We provide safe hardcoded fallbacks so the app still works if the env var
+#     is not set (common on first deploy to Vercel).
+
+_ALWAYS_ALLOWED: list[str] = [
+    # Production frontend — always permit
+    "https://sleep-monitoring-frontend.vercel.app",
+    # Local development origins
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://localhost:8000",
+]
+
+# env var format: comma-separated URLs
+# e.g. CORS_ORIGINS=https://my-app.vercel.app,https://staging.vercel.app
+_env_origins_raw = os.environ.get("CORS_ORIGINS", "")
+_env_origins: list[str] = [
+    o.strip() for o in _env_origins_raw.split(",") if o.strip()
+] if _env_origins_raw.strip() else []
+
+# Merge, deduplicate, and filter out any bare "*" (incompatible with credentials)
+_allowed_origins: list[str] = list({
+    o for o in (_ALWAYS_ALLOWED + _env_origins)
+    if o and o != "*"
+})
+
+logger.info(f"CORS allowed_origins={_allowed_origins}")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_credentials=True,         # Required so the frontend can send the session cookie
+    allow_origins=_allowed_origins, # Explicit list — no wildcard!
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 app.include_router(api_router)
