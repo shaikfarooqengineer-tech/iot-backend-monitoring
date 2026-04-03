@@ -1168,8 +1168,58 @@ async def get_hospital(hospital_id: str, request: Request):
     return hospital
  
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# USER MANAGEMENT ROUTES
+@api_router.patch("/hospitals/{hospital_id}")
+async def update_hospital(
+    hospital_id: str,
+    request: Request,
+    current_user: User = Depends(RoleChecker([UserRole.SUPERADMIN]))
+):
+    body = await request.json()
+    allowed_fields = {"is_active", "name", "address"}
+    update_data = {k: v for k, v in body.items() if k in allowed_fields}
+
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No valid fields to update")
+
+    hospital = await db.hospitals.find_one({"hospital_id": hospital_id}, {"_id": 0})
+    if not hospital:
+        raise HTTPException(status_code=404, detail="Hospital not found")
+
+    await db.hospitals.update_one(
+        {"hospital_id": hospital_id},
+        {"$set": update_data}
+    )
+    await log_activity(
+        current_user.user_id, current_user.name,
+        "updated", "hospital", hospital["name"],
+        f"Updated hospital {hospital_id}: {update_data}"
+    )
+
+    updated = await db.hospitals.find_one({"hospital_id": hospital_id}, {"_id": 0})
+    if isinstance(updated.get("created_at"), str):
+        updated["created_at"] = datetime.fromisoformat(updated["created_at"])
+    return updated
+
+
+@api_router.delete("/hospitals/{hospital_id}")
+async def delete_hospital(
+    hospital_id: str,
+    current_user: User = Depends(RoleChecker([UserRole.SUPERADMIN]))
+):
+    hospital = await db.hospitals.find_one({"hospital_id": hospital_id}, {"_id": 0})
+    if not hospital:
+        raise HTTPException(status_code=404, detail="Hospital not found")
+
+    await db.hospitals.delete_one({"hospital_id": hospital_id})
+    await log_activity(
+        current_user.user_id, current_user.name,
+        "deleted", "hospital", hospital["name"],
+        f"Deleted hospital: {hospital['name']} ({hospital_id})"
+    )
+    return {"message": f"Hospital '{hospital['name']}' deleted successfully"}
+
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # get_users is now role-aware
