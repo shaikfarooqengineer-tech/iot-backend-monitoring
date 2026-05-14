@@ -1,4 +1,5 @@
 import asyncio
+import uuid
 from typing import Any
 
 from pymongo.errors import DuplicateKeyError
@@ -6,6 +7,9 @@ from pydantic import ValidationError
 
 from app.db.mongo import mongo_manager
 from app.models.telemetry import (
+    BaseTelemetry,
+    StatusTelemetry,
+    HeartbeatTelemetry,
     AlertTelemetry,
     SleepTelemetry,
     VitalsTelemetry
@@ -23,6 +27,7 @@ class WriterService:
     - Validate telemetry
     - Route collections
     - Insert into MongoDB
+    - Retry transient Mongo failures
     """
 
     def __init__(self) -> None:
@@ -41,7 +46,9 @@ class WriterService:
             try:
                 telemetry_packet = await ingestion_queue.get()
 
-                await self.process_packet(telemetry_packet)
+                await self.process_packet(
+                    telemetry_packet
+                )
 
                 ingestion_queue.task_done()
 
@@ -61,58 +68,82 @@ class WriterService:
 
         logger.info("Writer service stopped")
 
+    async def process_packet(
+        self,
+        telemetry_packet: dict[str, Any]
+    ) -> None:
+        """
+        Process incoming telemetry packet.
+        """
 
-async def process_packet(
-    self,
-    telemetry_packet: dict[str, Any]
-) -> None:
+        topic = telemetry_packet["topic"]
 
-    topic = telemetry_packet["topic"]
+        payload = telemetry_packet["payload"]
 
-    payload = telemetry_packet["payload"]
+        try:
 
-    try:
+            # Normalize topic
+            topic = topic.lower()
 
-        # Convert seconds -> milliseconds
-        if payload.get("ts") and payload["ts"] < 999999999999:
-            payload["ts"] *= 1000
+            # Generate server-side event ID
+            if not payload.get("event_id"):
+                payload["event_id"] = str(
+                    uuid.uuid4()
+                )
 
-        collection_name, validated_payload = (
-            self.route_and_validate(
-                topic,
-                payload
+            # Convert seconds -> milliseconds
+            if (
+                payload.get("ts")
+                and payload["ts"] < 999999999999
+            ):
+                payload["ts"] *= 1000
+
+            # Validate + route
+            collection_name, validated_payload = (
+                self.route_and_validate(
+                    topic,
+                    payload
+                )
             )
-        )
 
-        collection = mongo_manager.db[collection_name]
+            collection = mongo_manager.db[
+                collection_name
+            ]
 
-        await self.insert_with_retry(
-            collection,
-            validated_payload.model_dump(by_alias=False)
-        )
+            # Mongo insert with retry
+            await self.insert_with_retry(
+                collection,
+                validated_payload.model_dump(
+                    by_alias=False
+                )
+            )
 
-        logger.info(
-            f"Telemetry inserted | collection={collection_name}"
-        )
+            logger.info(
+                "Telemetry inserted | "
+                f"collection={collection_name} | "
+                f"device_id={payload.get('did')}"
+            )
 
-    except DuplicateKeyError:
-        logger.warning(
-            f"Duplicate event ignored | "
-            f"event_id={payload.get('event_id')}"
-        )
+        except DuplicateKeyError:
+            logger.warning(
+                "Duplicate telemetry ignored | "
+                f"event_id={payload.get('event_id')}"
+            )
 
-    except ValidationError as exc:
-        logger.error(
-            f"Telemetry validation failed: {exc}"
-        )
+        except ValidationError as exc:
+            logger.error(
+                "Telemetry validation failed | "
+                f"topic={topic} | "
+                f"error={exc}"
+            )
 
-    except ValueError as exc:
-        logger.error(str(exc))
+        except ValueError as exc:
+            logger.error(str(exc))
 
-    except Exception as exc:
-        logger.exception(
-            f"Telemetry processing failure: {exc}"
-        )
+        except Exception as exc:
+            logger.exception(
+                f"Telemetry processing failure: {exc}"
+            )
 
     async def insert_with_retry(
         self,
@@ -126,7 +157,10 @@ async def process_packet(
 
         for attempt in range(retries):
             try:
-                await collection.insert_one(document)
+
+                await collection.insert_one(
+                    document
+                )
 
                 return
 
@@ -136,8 +170,9 @@ async def process_packet(
             except Exception as exc:
 
                 logger.warning(
-                    f"Mongo insert retry "
-                    f"{attempt + 1}/{retries}: {exc}"
+                    "Mongo insert retry | "
+                    f"attempt={attempt + 1}/{retries} | "
+                    f"error={exc}"
                 )
 
                 await asyncio.sleep(1)
@@ -145,8 +180,6 @@ async def process_packet(
         raise Exception(
             "Mongo insert failed after retries"
         )
-
-
 
     def route_and_validate(
         self,
@@ -159,18 +192,49 @@ async def process_packet(
         - Pydantic validation model
         """
 
-        topic = topic.lower()
+         # STATUS
+        if topic.endswith("/status"):
+            return "status", StatusTelemetry(
+            event_id=payload.get(
+                "event_id",
+                str(uuid.uuid4())
+            ),
+            device_id=payload.get("did"),
+            firmware=payload.get("fw"),
+            ts=payload.get("ts", 0)
+        )
 
-        if topic.endswith("/vitals"):
-            validated = VitalsTelemetry(**payload)
+
+        elif topic.endswith("/heartbeat"):
+
+            validated = HeartbeatTelemetry(
+                **payload
+            )
+
+            return "heartbeat", validated
+
+        elif topic.endswith("/vitals"):
+
+            validated = VitalsTelemetry(
+                **payload
+            )
+
             return "vitals", validated
 
         elif topic.endswith("/sleep"):
-            validated = SleepTelemetry(**payload)
+
+            validated = SleepTelemetry(
+                **payload
+            )
+
             return "sleep", validated
 
         elif topic.endswith("/alerts"):
-            validated = AlertTelemetry(**payload)
+
+            validated = AlertTelemetry(
+                **payload
+            )
+
             return "alerts", validated
 
         raise ValueError(

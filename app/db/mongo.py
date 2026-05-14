@@ -53,6 +53,8 @@ class MongoManager:
         logger.info("Creating MongoDB indexes...")
 
         collections = [
+            "status",
+            "heartbeat",
             "vitals",
             "sleep",
             "alerts"

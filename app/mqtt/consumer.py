@@ -201,6 +201,10 @@ class MQTTConsumer:
         try:
             decoded_payload = payload.decode()
 
+            logger.info(
+            f"RAW MQTT RECEIVED | topic={topic} | payload={decoded_payload}"
+        )
+
             message = json.loads(decoded_payload)
 
             telemetry_packet = {

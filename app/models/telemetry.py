@@ -5,45 +5,142 @@ from pydantic import BaseModel, Field, ConfigDict
 
 class BaseTelemetry(BaseModel):
     """
-    Common telemetry fields.
+    Common telemetry fields shared across all telemetry packets.
     """
+
     model_config = ConfigDict(
         populate_by_name=True,
         extra="allow"
     )
 
-     device_type: Optional[str] = Field(None, alias="dv")
+    # Core identifiers
+    event_id: Optional[str] = None
 
-    device_id: str = Field(..., alias="did")
+    device_type: Optional[str] = Field(
+        None,
+        alias="dv"
+    )
 
-    firmware: str = Field(..., alias="fw")
+    device_id: str = Field(
+        ...,
+        alias="did"
+    )
 
-    client_id: Optional[str] = Field(None, alias="cid")
+    firmware: str = Field(
+        ...,
+        alias="fw"
+    )
 
+    client_id: Optional[str] = Field(
+        None,
+        alias="cid"
+    )
+
+    # Device state
     status: Optional[str] = None
 
-    uptime_ms: int = Field(..., alias="ms")
+    # Timing
+    uptime_ms: Optional[int] = Field(
+        None,
+        alias="ms"
+    )
 
     ts: int
 
-    epoch: Optional[int] = Field(None, alias="ep")
+    epoch: Optional[int] = Field(
+        None,
+        alias="ep"
+    )
 
-    iso_timestamp: Optional[str] = Field(None, alias="iso")
+    iso_timestamp: Optional[str] = Field(
+        None,
+        alias="iso"
+    )
+
+
+class StatusTelemetry(BaseTelemetry):
+    """
+    Device online/offline lifecycle telemetry.
+    """
+
+    status: str
+
+
+class HeartbeatTelemetry(BaseTelemetry):
+    """
+    Lightweight periodic heartbeat telemetry.
+    """
+
+    pass
+
 
 class VitalsTelemetry(BaseTelemetry):
     """
-    Vitals telemetry payload.
+    Physiological vitals telemetry.
     """
 
+    # Human detection
+    human_detected: Optional[bool] = Field(
+        None,
+        alias="hu"
+    )
+
+    # Distance / environment
+    distance: Optional[float] = Field(
+        None,
+        alias="di"
+    )
+
+    lux: Optional[float] = Field(
+        None,
+        alias="lx"
+    )
+
+    # Core vitals
     hr: Optional[float] = None
+
     br: Optional[float] = None
 
+    # Heartbeat/Breath confidence
+    heartbeat_confidence: Optional[float] = Field(
+        None,
+        alias="bh"
+    )
+
+    breath_confidence: Optional[float] = Field(
+        None,
+        alias="bb"
+    )
+
+    # Sleep quality
+    sleep_quality: Optional[float] = Field(
+        None,
+        alias="sq"
+    )
+
+    confidence: Optional[float] = Field(
+        None,
+        alias="cf"
+    )
+
+    # States
+    sleeping: Optional[bool] = Field(
+        None,
+        alias="st"
+    )
+
+    high_load: Optional[bool] = Field(
+        None,
+        alias="hl"
+    )
+
+    # Alert metadata
     alert_level: Optional[str] = None
 
 
 class SleepTelemetry(BaseTelemetry):
     """
-    Sleep telemetry payload.
+    Sleep analytics telemetry.
     """
 
     sleep_stage: Optional[str] = None
@@ -55,7 +152,7 @@ class SleepTelemetry(BaseTelemetry):
 
 class AlertTelemetry(BaseTelemetry):
     """
-    Alerts telemetry payload.
+    Alert / anomaly telemetry.
     """
 
     alert_type: Optional[str] = None
