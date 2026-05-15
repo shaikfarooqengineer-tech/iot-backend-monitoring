@@ -35,6 +35,12 @@ dist
 *token.json*
 *credentials.json*
 
+#code-review-output 
+*.txt
+*.claude
+*.cursor
+
+
 # Logs and debug files
 npm-debug.log*
 yarn-debug.log*
@@ -75,7 +81,7 @@ agenthub/agents/youtube/db
 
 # Build caches
 .cache/
-
+*.txt
 # Mobile development
 android-sdk/ frontend/node_modules/.cache/default-development/2.pack
 frontend/node_modules/.cache/default-development/2.pack

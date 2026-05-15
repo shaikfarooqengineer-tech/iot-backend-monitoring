@@ -1398,43 +1398,139 @@ async def get_dashboard_stream(request: Request):
     Auth: Bearer token in Authorization header (same as all other REST endpoints).
     """
     await get_current_user(request)  # raises 401/403 if invalid
-    data = generate_dashboard_data()
-    return data.model_dump()
+    return generate_telemetry_doc()
 
 
-# ─── WebSocket Endpoint ────────────────────────────────────────────────────────
-# NOTE: This endpoint works perfectly on local uvicorn and proper ASGI servers.
-# On Vercel Serverless Functions it will NOT work because Lambda terminates after
-# the HTTP response — use /api/dashboard-stream for Vercel deployments.
+# ─── Telemetry Document Mock Generator ─────────────────────────────────────────
+# Generates mock data in the REAL MongoDB telemetry document schema
+# (not the old DashboardData shape). This is what the real IoT devices send.
+
+import time as _time
+_telemetry_counter = 0
+
+def generate_telemetry_doc():
+    """Generate a single telemetry document matching the real MongoDB schema."""
+    global _telemetry_counter
+    _telemetry_counter += 1
+
+    now = datetime.now(timezone.utc)
+    epoch = int(now.timestamp())
+    hr = round(random.uniform(55, 130), 1)
+    br = round(random.uniform(8, 24), 1)
+    spo2 = random.choice([None, 92, 94, 95, 96, 97, 98, 99])
+    systolic = random.randint(100, 145)
+    diastolic = random.randint(55, 95)
+    temp = round(random.uniform(35.0, 39.5), 1)
+    sleeping = random.random() > 0.5
+    human_detected = random.random() > 0.1
+
+    return {
+        "event_id": f"BM-BBFEFF16A398-{epoch}-{_telemetry_counter}",
+        "device_type": "BM",
+        "device_id": "BM-BBFEFF16A398",
+        "firmware": "10.9",
+        "client_id": None,
+        "status": None,
+        "uptime_ms": random.randint(100000, 9000000),
+        "ts": {"$numberLong": str(epoch * 1000)},
+        "epoch": epoch,
+        "iso_timestamp": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "human_detected": human_detected,
+        "distance": round(random.uniform(0.3, 3.0), 1),
+        "lux": round(random.uniform(0, 800), 1),
+        "hr": hr,
+        "br": br,
+        "spo2": spo2,
+        "bp": {
+            "systolic": systolic,
+            "diastolic": diastolic,
+            "raw": f"{systolic}/{diastolic}",
+        },
+        "temp": temp,
+        "heartbeat_confidence": round(random.uniform(50, 99), 1),
+        "breath_confidence": round(random.uniform(10, 95), 1),
+        "sleep_quality": round(random.uniform(0.1, 0.95), 2),
+        "confidence": round(random.uniform(0.3, 0.99), 2),
+        "sleeping": sleeping,
+        "high_load": random.random() < 0.05,
+        "alert_level": random.choice([None, None, None, "LOW", "MEDIUM", "HIGH"]),
+        "schema": "vitals",
+        "site_id": "HOSPITAL_01",
+        "room_id": "ROOM_101",
+        "hh": hr > 120,
+        "bl": random.random() < 0.03,
+        "bs": 0,
+        "aw": not sleeping and random.random() < 0.1,
+        "aa": random.random() < 0.02,
+        "al": random.choice([None, "LOW", "MEDIUM", "HIGH"]) if random.random() < 0.2 else None,
+    }
+
+
+# ─── WebSocket Endpoint (v2 — auth-frame protocol) ────────────────────────────
+# PROTOCOL:
+#   1. Client connects: ws://host/api/ws?patient_id=xxx  (NO token in URL)
+#   2. Server accepts the connection
+#   3. Client sends:    { "type": "auth", "token": "<session_token>" }
+#   4. Server validates token:
+#      - Success: sends { "type": "auth_ok" }, then starts streaming
+#      - Failure: sends { "type": "auth_fail", "reason": "..." }, closes 4001
+#   5. Client may send { "type": "ping" }, server replies { "type": "pong" }
 
 @api_router.websocket("/ws")
 async def websocket_endpoint(
     websocket: WebSocket,
     token: Optional[str] = Query(default=None),
-    patient_id: Optional[str] = Query(default=None),  # accepted but currently unused; data is mocked
+    patient_id: Optional[str] = Query(default=None),
 ):
     """
-    WebSocket real-time stream.
-    Query params:
-      ?token=<session_token>    — required for authentication
-      ?patient_id=<user_id>     — optional; used to scope future per-patient data
+    WebSocket real-time telemetry stream.
+    Supports both legacy (token in URL) and new (auth-frame) auth protocols.
     """
-    logger.info(f"WS handshake: patient_id={patient_id} token={'***' if token else 'MISSING'}")
-
-    if not token:
-        logger.warning("WS rejected: missing token")
-        await websocket.close(code=4001, reason="Missing auth token")
-        return
+    logger.info(f"WS handshake: patient_id={patient_id}")
 
     if db is None:
         logger.error("WS rejected: database unavailable")
         await websocket.close(code=4003, reason="Database unavailable")
         return
 
+    # Accept first, then authenticate via message
+    await websocket.accept()
+
+    # ── Auth phase ──────────────────────────────────────────────────────
+    auth_token = token  # legacy: from URL param
+
+    if not auth_token:
+        # New protocol: wait for auth frame (5s timeout)
+        try:
+            raw_msg = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
+            msg = json.loads(raw_msg)
+            if msg.get("type") == "auth":
+                auth_token = msg.get("token")
+            else:
+                await websocket.send_json({"type": "auth_fail", "reason": "Expected auth frame"})
+                await websocket.close(code=4001, reason="Expected auth frame")
+                return
+        except asyncio.TimeoutError:
+            logger.warning("WS rejected: auth timeout")
+            await websocket.send_json({"type": "auth_fail", "reason": "Auth timeout"})
+            await websocket.close(code=4001, reason="Auth timeout")
+            return
+        except Exception as e:
+            logger.warning(f"WS auth error: {e}")
+            await websocket.close(code=4001, reason="Auth error")
+            return
+
+    if not auth_token:
+        logger.warning("WS rejected: missing token")
+        await websocket.send_json({"type": "auth_fail", "reason": "Missing token"})
+        await websocket.close(code=4001, reason="Missing auth token")
+        return
+
     # Validate session token
-    session_doc = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
+    session_doc = await db.user_sessions.find_one({"session_token": auth_token}, {"_id": 0})
     if not session_doc:
         logger.warning("WS rejected: invalid token")
+        await websocket.send_json({"type": "auth_fail", "reason": "Invalid token"})
         await websocket.close(code=4001, reason="Invalid token")
         return
 
@@ -1445,28 +1541,54 @@ async def websocket_endpoint(
         expires_at = expires_at.replace(tzinfo=timezone.utc)
     if expires_at < datetime.now(timezone.utc):
         logger.warning("WS rejected: token expired")
+        await websocket.send_json({"type": "auth_fail", "reason": "Token expired"})
         await websocket.close(code=4001, reason="Token expired")
         return
 
-    # Auth passed — accept and stream continuously
-    logger.info(f"WS accepted for user_id={session_doc.get('user_id')} patient_id={patient_id}")
-    await manager.connect(websocket)
-    try:
-        # Send initial snapshot immediately so UI renders without waiting 3 s
-        initial_data = generate_dashboard_data()
-        await websocket.send_json(initial_data.model_dump())
-        logger.info("WS: sent initial dashboard snapshot")
+    # Auth passed — confirm and start streaming
+    await websocket.send_json({"type": "auth_ok"})
+    logger.info(f"WS auth_ok for user_id={session_doc.get('user_id')} patient_id={patient_id}")
 
-        while True:
-            await asyncio.sleep(3)
-            data = generate_dashboard_data()
-            await websocket.send_json(data.model_dump())
+    manager.active_connections.append(websocket)
+    try:
+        # Send initial telemetry snapshot immediately
+        initial_doc = generate_telemetry_doc()
+        await websocket.send_json(initial_doc)
+        logger.info("WS: sent initial telemetry snapshot")
+
+        # Background task: stream telemetry every 3s
+        async def stream_telemetry():
+            while True:
+                await asyncio.sleep(3)
+                doc = generate_telemetry_doc()
+                await websocket.send_json(doc)
+
+        stream_task = asyncio.create_task(stream_telemetry())
+
+        # Listen for client messages (ping/pong, etc.)
+        try:
+            while True:
+                raw = await websocket.receive_text()
+                try:
+                    msg = json.loads(raw)
+                    if msg.get("type") == "ping":
+                        await websocket.send_json({"type": "pong"})
+                except json.JSONDecodeError:
+                    pass
+        except WebSocketDisconnect:
+            pass
+        finally:
+            stream_task.cancel()
+
     except WebSocketDisconnect:
         logger.info(f"WS: client disconnected (patient_id={patient_id})")
-        manager.disconnect(websocket)
     except Exception as e:
         logger.error(f"WS stream error: {e}")
-        manager.disconnect(websocket)
+    finally:
+        if websocket in manager.active_connections:
+            manager.active_connections.remove(websocket)
+        logger.info(f"WS: cleaned up (patient_id={patient_id})")
+
 
 # ═════════════════════════════════════════════════════════════════════════
 # MIDDLEWARE & STARTUP
