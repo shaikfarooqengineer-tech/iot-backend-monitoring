@@ -39,6 +39,9 @@ dist
 *.txt
 *.claude
 *.cursor
+*.cursorrules
+*.agenthub
+*.cursorrules
 
 
 # Logs and debug files
