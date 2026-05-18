@@ -14,6 +14,7 @@ const AuthContext = createContext(null);
 export function AuthProvider({ children }) {
   const [user,    setUser]    = useState(null);
   const [loading, setLoading] = useState(true);  // true until /me resolves
+  const [token,   setToken]   = useState(() => localStorage.getItem("session_token") ?? null);
 
   // Verify session on every page load / refresh
   useEffect(() => {
@@ -31,6 +32,11 @@ export function AuthProvider({ children }) {
     verifySession();
   }, []);
 
+  // Keep token in sync when localStorage changes (e.g. login from another tab)
+  const updateToken = useCallback((newToken) => {
+    setToken(newToken);
+  }, []);
+
   // Clears session on server + wipes local state.
   // Navigation is handled by ProtectedRoute reacting to user === null.
   const logout = useCallback(async () => {
@@ -38,12 +44,13 @@ export function AuthProvider({ children }) {
       await authFetch(`${process.env.REACT_APP_BACKEND_URL}/api/auth/logout`, { method: "POST" });
     } catch { /* ignore network errors on logout */ }
     setUser(null);
+    setToken(null);
     // Remove token so authFetch stops sending it
     localStorage.removeItem("session_token");
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, setUser, loading, logout }}>
+    <AuthContext.Provider value={{ user, setUser, loading, logout, token, updateToken }}>
       {children}
     </AuthContext.Provider>
   );

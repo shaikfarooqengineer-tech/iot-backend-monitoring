@@ -91,6 +91,32 @@
     color: #D97706;
 }
 
+.icon-spo2 {
+    background-color: #F3E8FF;
+    color: #7C3AED;
+}
+
+.icon-bp {
+    background-color: #FCE7F3;
+    color: #DB2777;
+}
+
+.icon-temp {
+    background-color: #FFF7ED;
+    color: #EA580C;
+}
+
+.icon-presence {
+    background-color: #E0E7FF;
+    color: #4F46E5;
+}
+
+/* Badge for No Data / Monitoring state */
+.badge-slate {
+    background-color: #94A3B8;
+    color: white;
+}
+
 /* Chart styles */
 .trend-chart-container {
     height: 200px;
