@@ -1,4 +1,3 @@
-# Change this line at the top:
 from fastapi import Query
 from fastapi import Depends
 from fastapi import FastAPI, APIRouter, WebSocket, WebSocketDisconnect, Request, Response, HTTPException
@@ -23,6 +22,8 @@ from enum import Enum
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
+_SECURE_COOKIES: bool = os.environ.get("SECURE_COOKIES", "true").lower() != "false"
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -30,20 +31,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# MongoDB connection
+# MongoDB connection - Connects to both the application database and the telemetry database
 try:
     mongo_url = os.environ.get('MONGO_URL')
     db_name = os.environ.get('DB_NAME')
+    telemetry_db_name = os.environ.get('TELEMETRY_DB_NAME', 'vitals_monitoring')
 
     if not mongo_url or not db_name:
         raise ValueError("MONGO_URL and DB_NAME must be set in .env file")
 
     client = AsyncIOMotorClient(mongo_url, serverSelectionTimeoutMS=2000)
-    db = client[db_name]
-    logger.info("Attempting to connect to MongoDB...")
+    db = client[db_name]                                    # Main app database context (users, sessions, devices)
+    telemetry_db = client[telemetry_db_name]                # IoT telemetry database context (vitals, sleep, alerts)
+    logger.info(f"Connected to App DB: {db_name} and Telemetry DB: {telemetry_db_name}")
 except Exception as e:
     logger.warning(f"Failed to connect to MongoDB: {e}. Running with mock functionality.")
     db = None
+    telemetry_db = None
 
 # Create the main app without a prefix
 app = FastAPI()
@@ -198,6 +202,7 @@ class User(BaseModel):
     role: UserRole
     hospital_id: Optional[str] = None
     can_create_patients: bool = True
+    can_assign_devices: bool = False  # ─── NEW: set via PATCH /users/{id}/device-permissions
     created_at: datetime
 
 class UserCreate(BaseModel):
@@ -249,6 +254,25 @@ class DeviceAssign(BaseModel):
 
 class DeviceAssignToPatient(BaseModel):
     patient_id: str
+
+# ─── NEW: Device response model (API output — separate from input models above) ───
+class Device(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    device_id: str
+    device_serial: str
+    device_type: str
+    firmware_version: Optional[str] = None
+    hospital_id: Optional[str] = None
+    assigned_patient_id: Optional[str] = None
+    status: str  # "available" | "assigned_to_hospital" | "assigned_to_patient"
+    last_seen: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+# ─── NEW: Device permission update body ──────────────────────────────────────
+class DevicePermissionUpdate(BaseModel):
+    can_assign_devices: bool
+
 
 class LoginRequest(BaseModel):
     username: str
@@ -306,27 +330,6 @@ class EmployeeUpdate(BaseModel):
     join_date: Optional[str] = None
     status: Optional[str] = None
 
-
-
-# # ─── Client Models ─────────────────────────────────────────────────────────────
-
-# class Client(BaseModel):
-#     model_config = ConfigDict(extra="ignore")
-#     client_id: str
-#     company_name: str
-#     contact_person: str
-#     email: str
-#     phone: Optional[str] = None
-#     address: Optional[str] = None
-#     status: str = "active"  # active, inactive
-#     created_at: datetime
-
-# class ClientCreate(BaseModel):
-#     company_name: str
-#     contact_person: str
-#     email: str
-#     phone: Optional[str] = None
-#     address: Optional[str] = None
 
 # ─── Activity & Notification Models ───────────────────────────────────────────
 
@@ -506,7 +509,6 @@ def verify_password(password: str, hashed: str) -> bool:
 
 # Helper function to get user from token
 async def get_current_user(request: Request) -> User:
-
     """
     Reads session_token from cookie first, then Authorization header,
     then ?token= query param (for WebSocket upgrade requests).
@@ -517,7 +519,7 @@ async def get_current_user(request: Request) -> User:
         auth_header = request.headers.get("Authorization")
         if auth_header and auth_header.startswith("Bearer "):
             session_token = auth_header.replace("Bearer ", "")
-    
+        
     if not session_token:
         raise HTTPException(status_code=401, detail="Not authenticated")
     
@@ -612,6 +614,255 @@ async def send_email(to_email: str, subject: str, html_content: str):
     return None
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE 2 — DEVICE SERVICE HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+from pymongo.errors import DuplicateKeyError as MongoDuplicateKeyError
+
+
+async def resolve_telemetry(patient_id: str) -> dict:
+    """
+    Pure read function — queries separate vitals, sleep, and alerts collections
+    inside telemetry_db (vitals_monitoring) database, aggregates their latest records,
+    and maps the IoT device properties to match the frontend telemetry contract.
+    """
+    if db is None or telemetry_db is None:
+        return {
+            "source": "empty", 
+            "no_device": True, 
+            "device_type": "sleep_monitor",
+            "reason": "Database unavailable"
+        }
+
+    device = await db.devices.find_one(
+        {"assigned_patient_id": patient_id},
+        {"_id": 0}
+    )
+    if not device:
+        return {
+            "source": "empty",
+            "no_device": True,
+            "device_type": "sleep_monitor",
+            "reason": "No device assigned to this patient"
+        }
+
+    device_serial = device["device_serial"]
+    device_type = device.get("device_type") or "sleep_monitor"
+
+    # Query the absolute latest live document from each collection (no buggy 10-digit timestamp limitations)
+    vitals_doc = await telemetry_db.vitals.find_one(
+        {"device_id": device_serial},
+        sort=[("ts", -1)],
+        projection={"_id": 0}
+    )
+
+    sleep_doc = await telemetry_db.sleep.find_one(
+        {"device_id": device_serial},
+        sort=[("ts", -1)],
+        projection={"_id": 0}
+    )
+
+    alerts_doc = await telemetry_db.alerts.find_one(
+        {"device_id": device_serial},
+        sort=[("ts", -1)],
+        projection={"_id": 0}
+    )
+
+    # Trigger safe early return overlay if no telemetry frames exist across any collection
+    if not vitals_doc and not sleep_doc and not alerts_doc:
+        return {
+            "source": "empty",
+            "no_device": False,
+            "device_serial": device_serial,
+            "device_type": device_type,
+            "reason": "Device assigned but no telemetry received yet"
+        }
+
+    # Extract clean epochs from MongoDB Int64 / $numberLong representations (millis vs seconds)
+    def extract_epoch(doc: dict) -> int:
+        if not doc:
+            return 0
+        epoch_val = doc.get("epoch")
+        if epoch_val and isinstance(epoch_val, (int, float)):
+            return int(epoch_val // 1000) if epoch_val > 9999999999 else int(epoch_val)
+            
+        ts_val = doc.get("ts")
+        if ts_val:
+            if isinstance(ts_val, dict) and "$numberLong" in ts_val:
+                val = int(ts_val["$numberLong"])
+                return val // 1000 if val > 9999999999 else val
+            elif isinstance(ts_val, (int, float)):
+                return int(ts_val // 1000) if ts_val > 9999999999 else int(ts_val)
+        return 0
+
+    vitals_epoch = extract_epoch(vitals_doc)
+    sleep_epoch = extract_epoch(sleep_doc)
+    alerts_epoch = extract_epoch(alerts_doc)
+
+    # Establish the most recent active epoch
+    max_epoch = max(vitals_epoch, sleep_epoch, alerts_epoch)
+    if max_epoch <= 0:
+        max_epoch = int(datetime.now(timezone.utc).timestamp())
+
+    iso_timestamp = datetime.fromtimestamp(max_epoch, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Construct the primary normalized flat dictionary template
+    merged = {
+        "device_id": device_serial,
+        "device_type": device_type,  
+        "epoch": max_epoch,
+        "iso_timestamp": iso_timestamp,
+        "schema": "vitals",
+        "hr": 0,
+        "br": 0,
+        "di": 0.0,
+        "lx": 0.0,
+        "bb": 100,
+        "hu": False,
+        "hh": False,
+        "bl": False,
+        "uptime_ms": 0,
+        "event_id": f"event_{max_epoch}",
+        "site_id": "HOSPITAL_01",
+        "room_id": "ROOM_101",
+        "sg": "UNKNOWN",
+        "qq": 0,
+        "sa": False,
+        "sr": False,
+        "sleeping": False,
+        "fl": False,
+        "al": None,
+    }
+
+    # Order our available collection documents chronologically to overlay values sequentially
+    docs_with_epochs = []
+    if vitals_doc:
+        docs_with_epochs.append((vitals_epoch, vitals_doc))
+    if sleep_doc:
+        docs_with_epochs.append((sleep_epoch, sleep_doc))
+    if alerts_doc:
+        docs_with_epochs.append((alerts_epoch, alerts_doc))
+
+    # Sort ascending so newest documents' properties overwrite older ones
+    docs_with_epochs.sort(key=lambda x: x[0])
+
+    for _, doc in docs_with_epochs:
+        for k, v in doc.items():
+            if k == "_id":
+                continue
+            # Let the outer frame construct and own timestamps
+            if k in ["epoch", "ts", "iso_timestamp", "iso"]:
+                continue
+            merged[k] = v
+
+    # Post-merge key validation checks (Specifically guard device_type)
+    final_device_type = merged.get("device_type") or merged.get("dv") or device_type
+    if not isinstance(final_device_type, str) or not final_device_type.strip():
+        final_device_type = "sleep_monitor"
+    merged["device_type"] = final_device_type
+
+    # Force fallback support for nested structures
+    if "bp" not in merged and "bp" in (vitals_doc or {}):
+        merged["bp"] = vitals_doc["bp"]
+    if "temp" not in merged and "temp" in (vitals_doc or {}):
+        merged["temp"] = vitals_doc["temp"]
+    if "spo2" not in merged and "spo2" in (vitals_doc or {}):
+        merged["spo2"] = vitals_doc["spo2"]
+
+    # Normalize state triggers
+    if "sg" in merged:
+        merged["sleeping"] = merged["sg"] != "AWAKE"
+
+    merged["heartbeat_confidence"] = float(merged.get("heartbeat_confidence", 90.0))
+    merged["breath_confidence"] = float(merged.get("breath_confidence", 85.0))
+    merged["confidence"] = float(merged.get("confidence", 0.95))
+    merged["source"] = "live"
+    merged["no_device"] = False
+
+    return merged
+
+
+def validate_device_available(device_doc: dict):
+    """Raises 409 if device is already assigned to a patient."""
+    if device_doc.get("assigned_patient_id") is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Device is already assigned to patient {device_doc['assigned_patient_id']}"
+        )
+
+
+async def validate_patient_has_no_device(patient_id: str):
+    """Raises 409 if the patient already has an active device."""
+    existing = await db.devices.find_one(
+        {"assigned_patient_id": patient_id},
+        {"_id": 0, "device_serial": 1}
+    )
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Patient already has an active device: {existing['device_serial']}"
+        )
+
+
+def validate_hospital_match(current_user: User, device_doc: dict):
+    """Raises 403 if non-superadmin user's hospital doesn't match the device's hospital."""
+    if current_user.role == UserRole.SUPERADMIN:
+        return
+    if device_doc.get("hospital_id") != current_user.hospital_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Device does not belong to your hospital"
+        )
+
+
+def can_assign_devices_check(user: User):
+    """Raises 403 unless user is superadmin, hospital_admin, or staff with can_assign_devices=True."""
+    if user.role in [UserRole.SUPERADMIN, UserRole.HOSPITAL_ADMIN]:
+        return
+    if user.role == UserRole.STAFF and user.can_assign_devices:
+        return
+    raise HTTPException(
+        status_code=403,
+        detail="You do not have permission to assign devices to patients"
+    )
+
+
+async def sync_last_seen():
+    """
+    Background task: every 10s syncs devices.last_seen from latest vitals_monitoring doc.
+    Owned entirely by this task — resolve_telemetry() has NO last_seen side-effects.
+    """
+    while True:
+        try:
+            await asyncio.sleep(10)
+            if db is None or telemetry_db is None:
+                continue
+            assigned = await db.devices.find(
+                {"assigned_patient_id": {"$ne": None}},
+                {"device_serial": 1, "_id": 0}
+            ).to_list(1000)
+            for device in assigned:
+                # We check the latest timestamp from vitals collection inside vitals_monitoring
+                latest_vitals = await telemetry_db.vitals.find_one(
+                    {"device_id": device["device_serial"]},
+                    sort=[("ts", -1)],
+                    projection={"_id": 0, "iso": 1}
+                )
+                if latest_vitals:
+                    now_iso = datetime.now(timezone.utc).isoformat()
+                    iso_val = latest_vitals.get("iso") or now_iso
+                    await db.devices.update_one(
+                        {"device_serial": device["device_serial"]},
+                        {"$set": {
+                            "last_seen": iso_val,
+                            "updated_at": now_iso
+                        }}
+                    )
+        except Exception as e:
+            logger.warning(f"sync_last_seen error: {e}")
+
+
 #──────────────────────────────────────── Email templates───────────────────────────────────────────
 def get_password_reset_email(user_name: str, reset_token: str):
     return f"""
@@ -648,7 +899,7 @@ async def register_admin(admin_data: AdminRegister, response: Response):
     # Check if any admin exists
     existing_admin = await db.users.find_one({"role": UserRole.SUPERADMIN.value}, {"_id": 0})
     # if existing_admin:
-    #     raise HTTPException(status_code=400, detail="Admin already exists")
+    #      raise HTTPException(status_code=400, detail="Admin already exists")
     
     # Check if username exists
     existing_user = await db.users.find_one({"username": admin_data.username}, {"_id": 0})
@@ -691,8 +942,8 @@ async def register_admin(admin_data: AdminRegister, response: Response):
         key="session_token",
         value=session_token,
         httponly=True,
-        secure=True,
-        samesite="none",
+        secure=_SECURE_COOKIES,
+        samesite="none" if _SECURE_COOKIES else "lax",
         path="/",
         max_age=7 * 24 * 60 * 60
     )
@@ -704,8 +955,11 @@ async def register_admin(admin_data: AdminRegister, response: Response):
     })
     
     user_doc['created_at'] = now
-    del user_doc['password']
-    return User(**user_doc)
+    if 'password' in user_doc:
+        del user_doc['password']
+    user_response = User(**user_doc).model_dump()
+    user_response['session_token'] = session_token
+    return user_response
 
 
 # ───────────── Auth Routes/Login ───────────────────────────────────────────
@@ -719,7 +973,6 @@ async def login(login_data: LoginRequest, response: Response):
         user_doc = await db.users.find_one({"email": login_data.username}, {"_id": 0})
     
     if not user_doc:
-
         raise HTTPException(status_code=401, detail="Invalid email/username or password")
     
     # Verify password
@@ -742,8 +995,8 @@ async def login(login_data: LoginRequest, response: Response):
         key="session_token",
         value=session_token,
         httponly=True,
-        secure=True,
-        samesite="none",
+        secure=_SECURE_COOKIES,
+        samesite="none" if _SECURE_COOKIES else "lax",
         path="/",
         max_age=7 * 24 * 60 * 60
     )
@@ -755,6 +1008,7 @@ async def login(login_data: LoginRequest, response: Response):
     user_response = User(**user_doc).model_dump()
     user_response['session_token'] = session_token
     return user_response
+
 # ────── Auth Routes/Create User ───────────────────────────────────────────
 @api_router.post("/auth/create-user")
 async def create_team_member(user_data: UserCreate, request: Request):
@@ -1100,8 +1354,8 @@ async def create_session(request: Request, response: Response):
         key="session_token",
         value=session_token,
         httponly=True,
-        secure=True,
-        samesite="none",
+        secure=_SECURE_COOKIES,
+        samesite="none" if _SECURE_COOKIES else "lax",
         path="/",
         max_age=7 * 24 * 60 * 60
     )
@@ -1111,7 +1365,9 @@ async def create_session(request: Request, response: Response):
     if isinstance(user_doc['created_at'], str):
         user_doc['created_at'] = datetime.fromisoformat(user_doc['created_at'])
     
-    return User(**user_doc)
+    user_response = User(**user_doc).model_dump()
+    user_response['session_token'] = session_token
+    return user_response
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1164,7 +1420,7 @@ async def get_hospital(hospital_id: str, request: Request):
     if not hospital:
         raise HTTPException(status_code=404, detail="Hospital not found")
     if isinstance(hospital.get("created_at"), str):
-        hospital["created_at"] = datetime.fromisoformat(hospital["created_at"])
+        hospital["created_at"] = datetime.fromisoformat(hospital.get("created_at"))
     return hospital
  
 
@@ -1344,9 +1600,333 @@ async def update_permissions(user_id: str, data: StaffPermissionUpdate, request:
 
     return {"message": "Permissions updated"}
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE 3 — DEVICE API ROUTES
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+@api_router.post("/devices", status_code=201)
+async def register_device(
+    device_data: DeviceCreate,
+    current_user: User = Depends(RoleChecker([UserRole.SUPERADMIN]))
+):
+    """Register a new device into the unassigned pool. SuperAdmin only."""
+    device_id = f"device_{uuid.uuid4().hex[:16]}"
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+
+    doc = {
+        "device_id": device_id,
+        "device_serial": device_data.device_serial,
+        "device_type": device_data.device_type,
+        "firmware_version": device_data.firmware_version,
+        "hospital_id": None,
+        "assigned_patient_id": None,
+        "status": "available",
+        "last_seen": None,
+        "created_at": now_iso,
+        "updated_at": now_iso,
+    }
+
+    try:
+        await db.devices.insert_one(doc)
+    except MongoDuplicateKeyError:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A device with serial '{device_data.device_serial}' already exists"
+        )
+
+    await log_activity(
+        current_user.user_id, current_user.name,
+        "created", "device", device_data.device_serial,
+        f"Registered device: {device_data.device_serial} (type={device_data.device_type})"
+    )
+
+    doc["created_at"] = now
+    doc["updated_at"] = now
+    doc.pop("_id", None)
+    return Device(**doc)
+
+
+@api_router.get("/devices")
+async def list_devices(
+    request: Request,
+    hospital_id: Optional[str] = None
+):
+    """List devices. SuperAdmin=all; HospitalAdmin+Staff=hospital-scoped; Patient=403."""
+    current_user = await get_current_user(request)
+
+    if current_user.role == UserRole.PATIENT:
+        raise HTTPException(status_code=403, detail="Patients cannot access device management")
+
+    if current_user.role == UserRole.SUPERADMIN:
+        query = {"hospital_id": hospital_id} if hospital_id else {}
+    else:
+        query = {"hospital_id": current_user.hospital_id}
+
+    devices = await db.devices.find(query, {"_id": 0}).to_list(1000)
+
+    result = []
+    for d in devices:
+        if isinstance(d.get("created_at"), str):
+            d["created_at"] = datetime.fromisoformat(d["created_at"])
+        if isinstance(d.get("updated_at"), str):
+            d["updated_at"] = datetime.fromisoformat(d["updated_at"])
+        result.append(Device(**d).model_dump())
+    return result
+
+
+@api_router.get("/devices/{device_id}")
+async def get_device(device_id: str, request: Request):
+    """Get a single device. SuperAdmin=any; HospitalAdmin+Staff=hospital-scoped."""
+    current_user = await get_current_user(request)
+
+    if current_user.role == UserRole.PATIENT:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    device = await db.devices.find_one({"device_id": device_id}, {"_id": 0})
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    if current_user.role != UserRole.SUPERADMIN:
+        if device.get("hospital_id") != current_user.hospital_id:
+            raise HTTPException(status_code=403, detail="Device does not belong to your hospital")
+
+    if isinstance(device.get("created_at"), str):
+        device["created_at"] = datetime.fromisoformat(device["created_at"])
+    if isinstance(device.get("updated_at"), str):
+        device["updated_at"] = datetime.fromisoformat(device["updated_at"])
+    return Device(**device)
+
+
+@api_router.patch("/devices/{device_id}/assign-hospital")
+async def assign_hospital(
+    device_id: str,
+    body: DeviceAssign,
+    current_user: User = Depends(RoleChecker([UserRole.SUPERADMIN]))
+):
+    """Assign a device to a hospital. SuperAdmin only."""
+    device = await db.devices.find_one({"device_id": device_id}, {"_id": 0})
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    hospital = await db.hospitals.find_one({"hospital_id": body.hospital_id}, {"_id": 0})
+    if not hospital:
+        raise HTTPException(status_code=404, detail="Hospital not found")
+
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    updated = await db.devices.find_one_and_update(
+        {"device_id": device_id},
+        {"$set": {
+            "hospital_id": body.hospital_id,
+            "status": "assigned_to_hospital",
+            "updated_at": now_iso
+        }},
+        return_document=True,
+        projection={"_id": 0}
+    )
+
+    await log_activity(
+        current_user.user_id, current_user.name,
+        "assigned", "device", device["device_serial"],
+        f"Assigned device {device['device_serial']} to hospital {body.hospital_id}"
+    )
+
+    if isinstance(updated.get("created_at"), str):
+        updated["created_at"] = datetime.fromisoformat(updated["created_at"])
+    updated["updated_at"] = now
+    return Device(**updated)
+
+
+@api_router.patch("/devices/{device_id}/assign-patient")
+async def assign_patient(device_id: str, body: DeviceAssignToPatient, request: Request):
+    """
+    Assign a device to a patient.
+    RBAC: SuperAdmin, HospitalAdmin, Staff (if can_assign_devices=True).
+    Two-layer race condition protection:
+      Layer 1: find_one_and_update with assigned_patient_id=None
+      Layer 2: sparse unique index on assigned_patient_id catches concurrent dual-device assignment
+    """
+    current_user = await get_current_user(request)
+    can_assign_devices_check(current_user)
+
+    device = await db.devices.find_one({"device_id": device_id}, {"_id": 0})
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    validate_hospital_match(current_user, device)
+    validate_device_available(device)
+
+    # Verify patient exists
+    patient = await db.users.find_one(
+        {"user_id": body.patient_id, "role": UserRole.PATIENT.value},
+        {"_id": 0, "name": 1, "hospital_id": 1}
+    )
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    # Hospital-scoped users can only assign to patients in their own hospital
+    if current_user.role != UserRole.SUPERADMIN:
+        if patient.get("hospital_id") != current_user.hospital_id:
+            raise HTTPException(status_code=403, detail="Patient is in a different hospital")
+
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+
+    # Layer 1: atomic update — only succeeds if device is still unassigned
+    try:
+        updated = await db.devices.find_one_and_update(
+            {"device_id": device_id, "assigned_patient_id": None},
+            {"$set": {
+                "assigned_patient_id": body.patient_id,
+                "status": "assigned_to_patient",
+                "updated_at": now_iso
+            }},
+            return_document=True,
+            projection={"_id": 0}
+        )
+    except MongoDuplicateKeyError:
+        # Layer 2: unique sparse index caught concurrent dual-device-to-same-patient
+        raise HTTPException(
+            status_code=409,
+            detail="Patient already has an active device assigned"
+        )
+
+    if updated is None:
+        # Layer 1: device was assigned by a concurrent request
+        raise HTTPException(
+            status_code=409,
+            detail="Device was just assigned by another request"
+        )
+
+    await log_activity(
+        current_user.user_id, current_user.name,
+        "assigned", "device", device["device_serial"],
+        f"Assigned device {device['device_serial']} to patient {body.patient_id}"
+    )
+
+    if isinstance(updated.get("created_at"), str):
+        updated["created_at"] = datetime.fromisoformat(updated["created_at"])
+    updated["updated_at"] = now
+    return Device(**updated)
+
+
+@api_router.patch("/devices/{device_id}/unassign")
+async def unassign_device(device_id: str, request: Request):
+    """Unassign device from its patient. SuperAdmin + HospitalAdmin (hospital-scoped)."""
+    current_user = await get_current_user(request)
+
+    if current_user.role not in [UserRole.SUPERADMIN, UserRole.HOSPITAL_ADMIN]:
+        raise HTTPException(
+            status_code=403,
+            detail="Only superadmins and hospital admins can unassign devices"
+        )
+
+    device = await db.devices.find_one({"device_id": device_id}, {"_id": 0})
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    validate_hospital_match(current_user, device)
+
+    # Revert to hospital pool if still hospital-assigned, else back to unassigned pool
+    new_status = "assigned_to_hospital" if device.get("hospital_id") else "available"
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+
+    # Atomic update — only matches if patient is currently assigned
+    updated = await db.devices.find_one_and_update(
+        {"device_id": device_id, "assigned_patient_id": {"$ne": None}},
+        {"$set": {
+            "assigned_patient_id": None,
+            "status": new_status,
+            "updated_at": now_iso
+        }},
+        return_document=True,
+        projection={"_id": 0}
+    )
+
+    if updated is None:
+        raise HTTPException(status_code=409, detail="Device is not currently assigned to any patient")
+
+    await log_activity(
+        current_user.user_id, current_user.name,
+        "unassigned", "device", device["device_serial"],
+        f"Unassigned device {device['device_serial']} from patient"
+    )
+
+    if isinstance(updated.get("created_at"), str):
+        updated["created_at"] = datetime.fromisoformat(updated["created_at"])
+    updated["updated_at"] = now
+    return Device(**updated)
+
+
+@api_router.get("/patient/device")
+async def get_patient_device(
+    request: Request,
+    patient_id: Optional[str] = None
+):
+    """Get the device assigned to a patient. Any authenticated user."""
+    current_user = await get_current_user(request)
+
+    # Patients always see their own device; privileged roles may pass patient_id param
+    target_patient_id = (
+        current_user.user_id if current_user.role == UserRole.PATIENT
+        else (patient_id or current_user.user_id)
+    )
+
+    device = await db.devices.find_one(
+        {"assigned_patient_id": target_patient_id},
+        {"_id": 0}
+    )
+
+    if not device:
+        return {"device": None}
+
+    if isinstance(device.get("created_at"), str):
+        device["created_at"] = datetime.fromisoformat(device["created_at"])
+    if isinstance(device.get("updated_at"), str):
+        device["updated_at"] = datetime.fromisoformat(device["updated_at"])
+    return {"device": Device(**device).model_dump()}
+
+
+@api_router.patch("/users/{user_id}/device-permissions")
+async def update_device_permissions(
+    user_id: str,
+    data: DevicePermissionUpdate,
+    request: Request
+):
+    """Update can_assign_devices for a user. SuperAdmin + HospitalAdmin (hospital-scoped)."""
+    current_user = await get_current_user(request)
+
+    if current_user.role not in [UserRole.SUPERADMIN, UserRole.HOSPITAL_ADMIN]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    target_user = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+    if not target_user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if current_user.role == UserRole.HOSPITAL_ADMIN:
+        if target_user.get("hospital_id") != current_user.hospital_id:
+            raise HTTPException(status_code=403, detail="User is in a different hospital")
+
+    await db.users.update_one(
+        {"user_id": user_id},
+        {"$set": {"can_assign_devices": data.can_assign_devices}}
+    )
+
+    await log_activity(
+        current_user.user_id, current_user.name,
+        "updated", "user_permissions", target_user.get("name", user_id),
+        f"Set can_assign_devices={data.can_assign_devices} for user {user_id}"
+    )
+
+    return {"message": "Device permissions updated"}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # DASHBOARD & REST ENDPOINTS
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
  
 
 @api_router.get("/")
@@ -1387,83 +1967,85 @@ async def get_patients(request: Request):
     return patients
 
 
-# ─── HTTP Polling Endpoint (fallback for Vercel / serverless where WS is unsupported) ───
-# Frontend uses this when WebSocket fails (e.g., Vercel serverless = no persistent conn).
-# Returns the same DashboardData shape as the WebSocket messages.
+# ─── HTTP Polling Endpoint ─── FALLBACK: real telemetry only, no mock ────────────
 @api_router.get("/dashboard-stream")
-async def get_dashboard_stream(request: Request):
+async def get_dashboard_stream(
+    request: Request,
+    patient_id: Optional[str] = Query(default=None)
+):
     """
-    Polling fallback: identical payload to WebSocket messages.
-    Call every 3 s from the frontend when WebSocket is unavailable.
-    Auth: Bearer token in Authorization header (same as all other REST endpoints).
+    Polling fallback: returns real telemetry from vitals_monitoring via resolve_telemetry().
+    source="live"  → real data.
+    source="empty" → no device assigned or no data yet.
     """
-    await get_current_user(request)  # raises 401/403 if invalid
-    return generate_telemetry_doc()
+    current_user = await get_current_user(request)  # raises 401/403 if invalid
+    # Patients always get their own data; privileged roles may specify a patient_id
+    target_patient_id = (
+        patient_id
+        if patient_id and current_user.role != UserRole.PATIENT
+        else current_user.user_id
+    )
+    return await resolve_telemetry(target_patient_id)
 
 
-# ─── Telemetry Document Mock Generator ─────────────────────────────────────────
-# Generates mock data in the REAL MongoDB telemetry document schema
-# (not the old DashboardData shape). This is what the real IoT devices send.
-
-import time as _time
-_telemetry_counter = 0
-
-def generate_telemetry_doc():
-    """Generate a single telemetry document matching the real MongoDB schema."""
-    global _telemetry_counter
-    _telemetry_counter += 1
-
-    now = datetime.now(timezone.utc)
-    epoch = int(now.timestamp())
-    hr = round(random.uniform(55, 130), 1)
-    br = round(random.uniform(8, 24), 1)
-    spo2 = random.choice([None, 92, 94, 95, 96, 97, 98, 99])
-    systolic = random.randint(100, 145)
-    diastolic = random.randint(55, 95)
-    temp = round(random.uniform(35.0, 39.5), 1)
-    sleeping = random.random() > 0.5
-    human_detected = random.random() > 0.1
-
-    return {
-        "event_id": f"BM-BBFEFF16A398-{epoch}-{_telemetry_counter}",
-        "device_type": "BM",
-        "device_id": "BM-BBFEFF16A398",
-        "firmware": "10.9",
-        "client_id": None,
-        "status": None,
-        "uptime_ms": random.randint(100000, 9000000),
-        "ts": {"$numberLong": str(epoch * 1000)},
-        "epoch": epoch,
-        "iso_timestamp": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "human_detected": human_detected,
-        "distance": round(random.uniform(0.3, 3.0), 1),
-        "lux": round(random.uniform(0, 800), 1),
-        "hr": hr,
-        "br": br,
-        "spo2": spo2,
-        "bp": {
-            "systolic": systolic,
-            "diastolic": diastolic,
-            "raw": f"{systolic}/{diastolic}",
-        },
-        "temp": temp,
-        "heartbeat_confidence": round(random.uniform(50, 99), 1),
-        "breath_confidence": round(random.uniform(10, 95), 1),
-        "sleep_quality": round(random.uniform(0.1, 0.95), 2),
-        "confidence": round(random.uniform(0.3, 0.99), 2),
-        "sleeping": sleeping,
-        "high_load": random.random() < 0.05,
-        "alert_level": random.choice([None, None, None, "LOW", "MEDIUM", "HIGH"]),
-        "schema": "vitals",
-        "site_id": "HOSPITAL_01",
-        "room_id": "ROOM_101",
-        "hh": hr > 120,
-        "bl": random.random() < 0.03,
-        "bs": 0,
-        "aw": not sleeping and random.random() < 0.1,
-        "aa": random.random() < 0.02,
-        "al": random.choice([None, "LOW", "MEDIUM", "HIGH"]) if random.random() < 0.2 else None,
-    }
+# ─── NEW: Telemetry History Endpoint (Phase 1 Integration) ──────────────────────────────────────
+@api_router.get("/patients/{patient_id}/telemetry-history")
+async def get_patient_telemetry_history(
+    patient_id: str, 
+    request: Request, 
+    limit: int = Query(default=200, le=1000)
+):
+    """
+    Fetches the historical telemetry logs for a patient's assigned device.
+    Utilized on dashboard mount to pre-populate charts with authentic historical records.
+    """
+    current_user = await get_current_user(request)
+    # Check hospital scoping for non-superadmin users
+    if current_user.role != UserRole.SUPERADMIN:
+        target_patient = await db.users.find_one({"user_id": patient_id})
+        if target_patient and target_patient.get("hospital_id") != current_user.hospital_id:
+            raise HTTPException(status_code=403, detail="Unauthorized access to patient history")
+            
+    # Resolve patient's assigned device
+    device = await db.devices.find_one({"assigned_patient_id": patient_id})
+    if not device:
+        return {"history": []}
+        
+    device_serial = device["device_serial"]
+    
+    # Query logs from vitals collection in vitals_monitoring db
+    cursor = telemetry_db.vitals.find(
+        {"device_id": device_serial},
+        projection={"_id": 0}
+    ).sort("epoch", -1).limit(limit)
+    
+    logs = await cursor.to_list(limit)
+    
+    # Format and reverse list so records run chronologically (oldest to newest)
+    history = []
+    for log in logs:
+        # Resolve timestamp safely
+        iso_val = log.get("iso_timestamp") or log.get("iso")
+        if not iso_val and log.get("ts"):
+            # Convert millisecond timestamp dictionary/value to string if needed
+            ts_val = log["ts"]
+            if isinstance(ts_val, dict) and "$numberLong" in ts_val:
+                ts_val = int(ts_val["$numberLong"])
+            iso_val = datetime.fromtimestamp(ts_val / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            
+        history.append({
+            "iso_timestamp": iso_val,
+            "epoch": log.get("epoch"),
+            "hr": log.get("hr"),
+            "br": log.get("br"),
+            "spo2": log.get("spo2"),
+            "heartbeat_confidence": log.get("heartbeat_confidence"),
+            "breath_confidence": log.get("breath_confidence"),
+            "sleep_quality": log.get("sleep_quality"),
+        })
+        
+    history.reverse()
+    return {"history": history}
 
 
 # ─── WebSocket Endpoint (v2 — auth-frame protocol) ────────────────────────────
@@ -1549,19 +2131,25 @@ async def websocket_endpoint(
     await websocket.send_json({"type": "auth_ok"})
     logger.info(f"WS auth_ok for user_id={session_doc.get('user_id')} patient_id={patient_id}")
 
+    # Resolve target patient: URL param (admin viewing patient) or session owner (patient view)
+    target_patient_id = patient_id or session_doc.get("user_id")
+
     manager.active_connections.append(websocket)
     try:
-        # Send initial telemetry snapshot immediately
-        initial_doc = generate_telemetry_doc()
+        # Send initial snapshot immediately — real data only, no mock
+        initial_doc = await resolve_telemetry(target_patient_id)
         await websocket.send_json(initial_doc)
-        logger.info("WS: sent initial telemetry snapshot")
+        logger.info(f"WS: initial snapshot source={initial_doc.get('source')} patient={target_patient_id}")
 
-        # Background task: stream telemetry every 3s
+        # Adaptive streaming: 3s on live data, 10s on empty (avoids DB hammering)
         async def stream_telemetry():
             while True:
-                await asyncio.sleep(3)
-                doc = generate_telemetry_doc()
+                doc = await resolve_telemetry(target_patient_id)
                 await websocket.send_json(doc)
+                if doc.get("source") == "live":
+                    await asyncio.sleep(3)
+                else:
+                    await asyncio.sleep(10)
 
         stream_task = asyncio.create_task(stream_telemetry())
 
@@ -1609,7 +2197,7 @@ _ALWAYS_ALLOWED: list[str] = [
     # Local development origins
     "http://localhost:3000",
     "http://localhost:5173",
-    "http://localhost:8000",
+    "http://localhost:8001",
 ]
 
 # env var format: comma-separated URLs
@@ -1650,12 +2238,40 @@ async def create_indexes():
         await db.user_sessions.create_index("session_token", unique=True)
         await db.user_sessions.create_index("expires_at", expireAfterSeconds=0)  # TTL index
         await db.hospitals.create_index("hospital_id", unique=True)
+        # --- NEW: devices collection indexes ---
+        await db.devices.create_index("device_id", unique=True)
+        await db.devices.create_index("device_serial", unique=True)
+        await db.devices.create_index(
+            [("assigned_patient_id", 1)], sparse=True, unique=True
+        )  # sparse+unique: one-device-per-patient at DB level
+        await db.devices.create_index([("hospital_id", 1)])
+        await db.devices.create_index([("status", 1)])
+        
+        # Create indexes in the telemetry database collections
+        if telemetry_db is not None:
+            await telemetry_db.vitals.create_index([("device_id", 1), ("ts", -1)])
+            await telemetry_db.sleep.create_index([("device_id", 1), ("ts", -1)])
+            await telemetry_db.alerts.create_index([("device_id", 1), ("ts", -1)])
+            
         logger.info("MongoDB indexes created")
     except Exception as e:
         logger.error(f"Error creating indexes: {e}")
+
+
+@app.on_event("startup")
+async def start_background_tasks():
+    """
+    Launches background tasks. Intentionally separate from create_indexes().
+    sync_last_seen: keeps devices.last_seen in sync from vitals_monitoring every 10s.
+    """
+    if db is None:
+        logger.warning("start_background_tasks: db not ready, skipping")
+        return
+    asyncio.create_task(sync_last_seen())
+    logger.info("sync_last_seen background task started")
+
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
     if client:
         client.close()
-      

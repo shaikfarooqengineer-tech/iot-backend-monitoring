@@ -2,11 +2,13 @@ import { useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { authFetch } from '@/utils/authFetch';
 import { toast } from 'sonner';
+import { useAuth } from '@/context/AuthContext';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 
 export default function AuthCallback() {
   const navigate = useNavigate();
+  const { setUser, saveToken } = useAuth();
   const hasProcessed = useRef(false);
 
   useEffect(() => {
@@ -41,8 +43,9 @@ export default function AuthCallback() {
         const userData = await response.json();
         // Save session token for cross-domain auth
         if (userData.session_token) {
-          localStorage.setItem('session_token', userData.session_token);
+          saveToken(userData.session_token);
         }
+        setUser(userData);
         toast.success(`Welcome back, ${userData.name}!`);
         
         // Navigate to dashboard with user data

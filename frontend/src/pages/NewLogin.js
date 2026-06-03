@@ -14,7 +14,7 @@ const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 
 export default function NewLogin() {
   const navigate = useNavigate();
-  const { setUser } = useAuth();
+  const { setUser, saveToken } = useAuth();
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [loginError, setLoginError] = useState('');
@@ -53,7 +53,7 @@ export default function NewLogin() {
 
       if (response.ok) {
         const userData = await response.json();
-        if (userData.session_token) localStorage.setItem('session_token', userData.session_token);
+        if (userData.session_token) saveToken(userData.session_token);
         setUser(userData);
         toast.success(`Welcome back, ${userData.name}!`);
         navigate(ROLE_HOME[userData.role] ?? '/dashboard', { replace: true });

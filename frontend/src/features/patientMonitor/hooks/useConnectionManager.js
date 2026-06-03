@@ -114,7 +114,7 @@ export function useConnectionManager(patientId) {
   const authTimeoutRef     = useRef(null);
   const pingIntervalRef    = useRef(null);
   const pongTimeoutRef     = useRef(null);
-  const staleWatchdogRef   = useRef(null);
+  const staleWatchdogRef    = useRef(null);
   const isMounted          = useRef(true);
   const retryCountRef      = useRef(0);
   const latestEpoch        = useRef(-1);
@@ -131,6 +131,10 @@ export function useConnectionManager(patientId) {
 
   // Keep tokenRef fresh
   useEffect(() => { tokenRef.current = token; }, [token]);
+
+  const resolveToken = useCallback(() => {
+    return tokenRef.current || localStorage.getItem("session_token");
+  }, []);
 
   // ─── Cleanup helper ─────────────────────────────────────────────────────
 
@@ -157,6 +161,20 @@ export function useConnectionManager(patientId) {
   // ─── Process validated packet ───────────────────────────────────────────
 
   const processPacket = useCallback((rawData) => {
+    // Status frames (source=empty) bypass schema validation — no epoch, no event_id
+    if (rawData && rawData.source === "empty") {
+      if (!isMounted.current) return;
+      docRef.current = rawData;
+      lastTelemetryAt.current = Date.now();
+      
+      // Critical Phase 3 fix: Trigger parent callback ref so standard fallback data streams pass through
+      if (onDocReceived.current) onDocReceived.current(rawData);
+      
+      dispatch({ type: "FRESH_RECEIVED" });
+      dispatch({ type: "MESSAGE_RECEIVED" });
+      return;
+    }
+
     const result = parsePacket(rawData);
     if (!result.success) {
       log.warn("packet_discarded_schema_invalid", { issues: result.error });
@@ -177,10 +195,10 @@ export function useConnectionManager(patientId) {
     docRef.current = doc;
     lastTelemetryAt.current = Date.now();
 
-    // Notify parent
+    // Critical Phase 3 fix: Notify parent on successful live stream frames
     if (onDocReceived.current) onDocReceived.current(doc);
 
-    // Clear stale if needed
+    // Clear stale status state variables
     dispatch({ type: "FRESH_RECEIVED" });
     dispatch({ type: "MESSAGE_RECEIVED" });
   }, [log]);
@@ -188,8 +206,12 @@ export function useConnectionManager(patientId) {
   // ─── HTTP Polling (FIX 2: uses tokenRef from useAuth) ──────────────────
 
   const fetchPoll = useCallback(async () => {
+    console.log("[DEBUG] fetchPoll called");
+    console.log("[DIAGNOSTIC] fetchPoll sending token value:", tokenRef.current);
+    console.log("[DIAGNOSTIC] localStorage token value:", localStorage.getItem('session_token'));
+
     if (!isMounted.current) return;
-    const currentToken = tokenRef.current;
+    const currentToken = resolveToken();
     if (!currentToken) {
       log.warn("poll_error", { reason: "No session token" });
       return;
@@ -201,7 +223,7 @@ export function useConnectionManager(patientId) {
     }
 
     try {
-      const url = `${BACKEND_HTTP}/api/dashboard-stream`;
+      const url = `${BACKEND_HTTP}/api/dashboard-stream${patientId ? `?patient_id=${encodeURIComponent(patientId)}` : ""}`;
       log.info("poll_start", { url });
 
       const res = await fetch(url, {
@@ -226,7 +248,7 @@ export function useConnectionManager(patientId) {
         dispatch({ type: "DISCONNECT", message: `Poll error: ${err.message}` });
       }
     }
-  }, [log, processPacket]);
+  }, [log, processPacket, patientId, resolveToken]);
 
   // ─── Start polling ──────────────────────────────────────────────────────
 
@@ -288,7 +310,7 @@ export function useConnectionManager(patientId) {
       return;
     }
 
-    // FIX 1: NO token in URL
+    // FIX 1: NO token in URL parameters
     const wsUrl = `${BACKEND_WS}/api/ws?patient_id=${encodeURIComponent(patientId)}`;
     const attempt = retryCountRef.current + 1;
 
@@ -321,19 +343,26 @@ export function useConnectionManager(patientId) {
       clearTimeout(connectTimeoutRef.current);
 
       // FIX 1: Send auth frame immediately
-      const currentToken = tokenRef.current;
+      const currentToken = resolveToken();
       if (!currentToken) {
+        // Corrected contextual logging for WebSocket authentication
+        console.log("[DEBUG] WebSocket Connection: Missing auth token");
+        console.log("[DIAGNOSTIC] authContext token value:", tokenRef.current);
+        console.log("[DIAGNOSTIC] localStorage token value:", localStorage.getItem('session_token'));
         log.error("ws_auth_failed", { reason: "No token available" });
         ws.close(4001, "No auth token");
         dispatch({ type: "AUTH_FAIL", message: "No authentication token" });
         return;
       }
+      
+      // Critical Phase 3 bugfix: logic inversion correction (only logs when successfully resolved)
+      console.log("[DEBUG] WebSocket token resolved successfully, sending auth frame");
 
       log.info("ws_auth_sent");
       ws.send(JSON.stringify({ type: "auth", token: currentToken }));
       dispatch({ type: "AUTH_SENT" });
 
-      // Auth timeout — must receive auth_ok within 5s
+      // Auth timeout — must receive auth_ok frame within 5 seconds
       clearTimeout(authTimeoutRef.current);
       authTimeoutRef.current = setTimeout(() => {
         if (isMounted.current) {
@@ -414,8 +443,7 @@ export function useConnectionManager(patientId) {
 
       handleWsFailure(`Closed: code=${event.code}`);
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [patientId, startPolling, processPacket, startHeartbeat, log, toastOnce]);
+  }, [patientId, startPolling, processPacket, startHeartbeat, log, toastOnce, resolveToken]);
 
   // ─── Handle WS failure (FIX 3: jitter) ─────────────────────────────────
 
@@ -440,8 +468,7 @@ export function useConnectionManager(patientId) {
 
     clearTimeout(reconnectTimeout.current);
     reconnectTimeout.current = setTimeout(connectWebSocket, delay);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [startPolling, log]);
+  }, [startPolling, log, connectWebSocket]);
 
   // ─── Manual retry ──────────────────────────────────────────────────────
 
@@ -460,8 +487,9 @@ export function useConnectionManager(patientId) {
     staleWatchdogRef.current = setInterval(() => {
       if (lastTelemetryAt.current && Date.now() - lastTelemetryAt.current > STALE_TIMEOUT_MS) {
         const staleSec = Math.round((Date.now() - lastTelemetryAt.current) / 1000);
-        dispatch({ type: "STALE_DETECTED", message: `Data Stale — last update ${staleSec}s ago` });
-        log.warn("stale_detected", { staleSec });
+        const staleMin = Math.round(staleSec / 60);
+        dispatch({ type: "STALE_DETECTED", message: `Data Stale — last update ${staleMin} minutes ago` });
+        log.warn("stale_detected", { staleSec }); 
       }
     }, STALE_CHECK_INTERVAL);
 
@@ -502,8 +530,7 @@ export function useConnectionManager(patientId) {
       stopAll();
       log.info("cleanup");
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [patientId, token]);
+  }, [patientId, token, connectWebSocket, stopAll, log]);
 
   return {
     connState,

@@ -15,6 +15,8 @@ export const TelemetrySchema = z.object({
   event_id:             z.string(),
   device_type:          z.string(),
   device_id:            z.string(),
+  source:               z.enum(["live", "empty", "stale"]).optional(),
+  no_device:            z.boolean().optional(),
   firmware:             z.string().nullable().optional(),
   client_id:            z.string().nullable().optional(),
   status:               z.string().nullable().optional(),
@@ -50,7 +52,7 @@ export const TelemetrySchema = z.object({
   aw:                   z.boolean().optional(),
   aa:                   z.boolean().optional(),
   al:                   z.string().nullable().optional(),
-});
+}).passthrough();
 
 /**
  * parsePacket — validate a raw JSON payload against TelemetrySchema.
