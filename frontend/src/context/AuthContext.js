@@ -32,9 +32,14 @@ export function AuthProvider({ children }) {
     verifySession();
   }, []);
 
-  // Keep token in sync when localStorage changes (e.g. login from another tab)
-  const updateToken = useCallback((newToken) => {
+  // Atomic token setter to prevent sync mismatches
+  const saveToken = useCallback((newToken) => {
     setToken(newToken);
+    if (newToken) {
+      localStorage.setItem("session_token", newToken);
+    } else {
+      localStorage.removeItem("session_token");
+    }
   }, []);
 
   // Clears session on server + wipes local state.
@@ -44,13 +49,11 @@ export function AuthProvider({ children }) {
       await authFetch(`${process.env.REACT_APP_BACKEND_URL}/api/auth/logout`, { method: "POST" });
     } catch { /* ignore network errors on logout */ }
     setUser(null);
-    setToken(null);
-    // Remove token so authFetch stops sending it
-    localStorage.removeItem("session_token");
-  }, []);
+    saveToken(null);
+  }, [saveToken]);
 
   return (
-    <AuthContext.Provider value={{ user, setUser, loading, logout, token, updateToken }}>
+    <AuthContext.Provider value={{ user, setUser, loading, logout, token, saveToken }}>
       {children}
     </AuthContext.Provider>
   );

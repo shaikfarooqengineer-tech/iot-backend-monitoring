@@ -17,7 +17,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 
 export default function Register() {
   const navigate = useNavigate();
-  const { setUser } = useAuth();
+  const { setUser, saveToken } = useAuth();
 
   const [checking, setChecking] = useState(true);  // checking if admin already exists
   const [loading,  setLoading]  = useState(false);
@@ -94,7 +94,7 @@ export default function Register() {
         const userData = await res.json();
         // Store session token from login response
         if (userData.session_token) {
-          localStorage.setItem("session_token", userData.session_token);
+          saveToken(userData.session_token);
         }
         setUser(userData);  // update global auth context immediately
         toast.success("Superadmin account created! Welcome to VitalSync.");

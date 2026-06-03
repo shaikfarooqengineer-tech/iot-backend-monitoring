@@ -1,7 +1,12 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // FILE: src/features/patientMonitor/hooks/useTelemetryProcessor.js
 // PURPOSE: Consumes validated telemetry docs from useConnectionManager.
-//          Manages: HR/RR chart history (throttled), alert log (flag transitions).
+//          Two-state design:
+//            liveDoc       — updated ONLY when source === "live"
+//                            Drives charts, vitals, alerts.
+//                            Survives device going offline (never cleared).
+//            connectionDoc — updated on EVERY packet (live or empty).
+//                            Drives UI state branching (no-device / waiting / live).
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { useState, useRef, useCallback } from "react";
@@ -27,52 +32,136 @@ const FLAG_ALERT_MAP = [
 // ─── Hook ───────────────────────────────────────────────────────────────────
 
 export function useTelemetryProcessor() {
-  const [doc, setDoc]             = useState(null);
-  const [hrHistory, setHrHistory] = useState([]);
-  const [rrHistory, setRrHistory] = useState([]);
-  const [alertLog, setAlertLog]   = useState([]);
-  const [lastUpdate, setLastUpdate] = useState(null);
-
-  // Refs for chart buffering (append at full rate, flush throttled)
-  const hrBufferRef     = useRef([]);
-  const rrBufferRef     = useRef([]);
-  const lastChartFlush  = useRef(0);
+  // liveDoc: last real telemetry document. Never set to null after first live frame.
+  const [liveDoc, setLiveDoc]               = useState(null);
+  // connectionDoc: reflects the most recent packet from the server (any source).
+  const [connectionDoc, setConnectionDoc]   = useState(null);
+  const [hrHistory, setHrHistory]           = useState([]);
+  const [rrHistory, setRrHistory]           = useState([]);
+  const [alertLog, setAlertLog]             = useState([]);
+  const [lastUpdate, setLastUpdate]         = useState(null);
 
   // Ref for alert flag transition detection
   const flagStateRef = useRef({});
 
-  // ─── Process one validated doc ──────────────────────────────────────────
+  // ─── Bulk Initializer for Historical Data ─────────────────────────────
+
+  const initializeHistory = useCallback((historyList) => {
+    if (!Array.isArray(historyList)) return;
+
+    const hrPoints = historyList
+      .filter(item => item.hr !== null && item.hr !== undefined)
+      .map(item => {
+        const timeLabel = item.iso_timestamp
+          ? new Date(item.iso_timestamp).toLocaleTimeString()
+          : item.epoch
+            ? new Date(item.epoch * 1000).toLocaleTimeString()
+            : new Date().toLocaleTimeString();
+        return {
+          timestamp: item.iso_timestamp,
+          epoch: item.epoch,
+          value: item.hr,
+          confidence: item.heartbeat_confidence,
+          time: timeLabel // Backwards compatible with legacy chart components
+        };
+      });
+
+    const rrPoints = historyList
+      .filter(item => item.br !== null && item.br !== undefined)
+      .map(item => {
+        const timeLabel = item.iso_timestamp
+          ? new Date(item.iso_timestamp).toLocaleTimeString()
+          : item.epoch
+            ? new Date(item.epoch * 1000).toLocaleTimeString()
+            : new Date().toLocaleTimeString();
+        return {
+          timestamp: item.iso_timestamp,
+          epoch: item.epoch,
+          value: item.br,
+          confidence: item.breath_confidence,
+          time: timeLabel // Backwards compatible with legacy chart components
+        };
+      });
+
+    setHrHistory(hrPoints);
+    setRrHistory(rrPoints);
+
+    if (historyList.length > 0) {
+      const lastRecord = historyList[historyList.length - 1];
+      const telemetryTime = lastRecord.iso_timestamp
+        ? new Date(lastRecord.iso_timestamp)
+        : lastRecord.epoch
+          ? new Date(lastRecord.epoch * 1000)
+          : new Date();
+      setLastUpdate(telemetryTime);
+    }
+  }, []);
+
+  // ─── Process Live Stream Documents ─────────────────────────────────────
 
   const processDoc = useCallback((newDoc) => {
-    setDoc(newDoc);
-    setLastUpdate(new Date());
+    // Always update connectionDoc — drives UI state decisions
+    setConnectionDoc(newDoc);
 
-    // ── Chart history accumulation ───────────────────────────────────────
+    // Resolve accurate packet timestamp from packet metadata (not browser time)
+    const telemetryTime = newDoc.iso_timestamp
+      ? new Date(newDoc.iso_timestamp)
+      : newDoc.epoch
+        ? new Date(newDoc.epoch * 1000)
+        : new Date();
 
-    const timeLabel = newDoc.epoch
-      ? new Date(newDoc.epoch * 1000).toLocaleTimeString()
-      : new Date().toLocaleTimeString();
+    setLastUpdate(telemetryTime);
+
+    // Only update liveDoc (and charts/alerts) for real live telemetry
+    if (newDoc.source !== "live") {
+      // source === "empty" or "stale": connectionDoc is updated, liveDoc is preserved.
+      // Last real reading stays visible if the device goes offline.
+      return;
+    }
+
+    setLiveDoc(newDoc);
+
+    // Formulate a backwards-compatible time label for active charts
+    const timeLabel = telemetryTime.toLocaleTimeString();
+
+    // ── Chart history accumulation (deduplicated) ───────────────────────
 
     if (newDoc.hr != null) {
-      hrBufferRef.current.push({ time: timeLabel, value: newDoc.hr });
-      if (hrBufferRef.current.length > CHART_MAX_POINTS) {
-        hrBufferRef.current = hrBufferRef.current.slice(-CHART_MAX_POINTS);
-      }
+      setHrHistory(prev => {
+        const isDuplicate = prev.some(item => 
+          (item.epoch && item.epoch === newDoc.epoch) || 
+          (item.timestamp && item.timestamp === newDoc.iso_timestamp)
+        );
+        if (isDuplicate) return prev;
+
+        const updated = [...prev, {
+          timestamp: newDoc.iso_timestamp,
+          epoch: newDoc.epoch,
+          value: newDoc.hr,
+          confidence: newDoc.heartbeat_confidence,
+          time: timeLabel
+        }];
+        return updated.slice(-CHART_MAX_POINTS);
+      });
     }
 
     if (newDoc.br != null) {
-      rrBufferRef.current.push({ time: timeLabel, value: newDoc.br });
-      if (rrBufferRef.current.length > CHART_MAX_POINTS) {
-        rrBufferRef.current = rrBufferRef.current.slice(-CHART_MAX_POINTS);
-      }
-    }
+      setRrHistory(prev => {
+        const isDuplicate = prev.some(item => 
+          (item.epoch && item.epoch === newDoc.epoch) || 
+          (item.timestamp && item.timestamp === newDoc.iso_timestamp)
+        );
+        if (isDuplicate) return prev;
 
-    // Throttled chart flush — at most once per second
-    const now = Date.now();
-    if (now - lastChartFlush.current > CHART_FLUSH_INTERVAL_MS) {
-      setHrHistory([...hrBufferRef.current]);
-      setRrHistory([...rrBufferRef.current]);
-      lastChartFlush.current = now;
+        const updated = [...prev, {
+          timestamp: newDoc.iso_timestamp,
+          epoch: newDoc.epoch,
+          value: newDoc.br,
+          confidence: newDoc.breath_confidence,
+          time: timeLabel
+        }];
+        return updated.slice(-CHART_MAX_POINTS);
+      });
     }
 
     // ── Alert derivation from flag transitions ───────────────────────────
@@ -155,11 +244,13 @@ export function useTelemetryProcessor() {
   }, []);
 
   return {
-    doc,
+    liveDoc,        // use for: charts, vitals, alerts, all telemetry widgets
+    connectionDoc,  // use for: UI state branching (no-device / waiting / live)
     hrHistory,
     rrHistory,
     alertLog,
     lastUpdate,
     processDoc,
+    initializeHistory,
   };
 }
