@@ -296,7 +296,8 @@ export default function HospitalManagement() {
                     {h.address && (
                       <p className="text-sm text-slate-500 mt-0.5">{h.address}</p>
                     )}
-                    <div className="flex items-center gap-2 mt-1">
+                    <div className="flex items-center gap-2 mt-1 text-xs text-slate-600">
+                      <span>Hospital ID:</span>
                       <code className="text-xs text-slate-400 font-mono bg-slate-50 px-2 py-0.5 rounded border border-slate-200">
                         {h.hospital_id}
                       </code>
