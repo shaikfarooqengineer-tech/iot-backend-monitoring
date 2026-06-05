@@ -7,7 +7,7 @@
 import { useState, useEffect } from "react";
 import { toast } from "sonner";
 import { Link } from "react-router-dom";
-import { UserCircle, Activity, UserPlus, Pencil, Trash2 } from "lucide-react";
+import { UserCircle, Activity, UserPlus, Pencil, Trash2, Copy } from "lucide-react";
 import { authFetch } from "@/utils/authFetch";
 import { usePermissions } from "@/hooks/usePermissions";
 import { CreatePatientModal } from "@/components/CreatePatientModal";
@@ -22,13 +22,13 @@ const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export default function PatientList() {
   const { isAdmin, canCreate } = usePermissions();
   const [patients, setPatients] = useState([]);
-  const [loading,  setLoading]  = useState(true);
+  const [loading, setLoading] = useState(true);
 
   // Modal state
-  const [admitOpen,   setAdmitOpen]   = useState(false);
+  const [admitOpen, setAdmitOpen] = useState(false);
   const [editPatient, setEditPatient] = useState(null);
   const [deletePatient, setDeletePatient] = useState(null);
-  const [deleting,    setDeleting]    = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     const load = async () => {
@@ -37,7 +37,7 @@ export default function PatientList() {
         if (res.ok) setPatients(await res.json());
         else toast.error("Failed to load patients");
       } catch { toast.error("Network error"); }
-      finally  { setLoading(false); }
+      finally { setLoading(false); }
     };
     load();
   }, []);
@@ -67,6 +67,17 @@ export default function PatientList() {
     } catch { toast.error("Network error"); }
     finally { setDeleting(false); }
   };
+
+  //copy Patient ID.........
+  const copyPatientId = async (patientId) => {
+    try {
+      await navigator.clipboard.writeText(patientId);
+      toast.success("Patient ID copied successfully");
+    } catch {
+      toast.error("Failed to copy Patient ID");
+    }
+  };
+
 
   const showAdmitBtn = isAdmin || canCreate("patient");
 
@@ -104,13 +115,29 @@ export default function PatientList() {
                         {p.avatar_url
                           ? <img src={p.avatar_url} alt={p.name} className="w-full h-full rounded-full object-cover" />
                           : <span className="text-xs font-bold text-slate-500">
-                              {(p.name ?? "P").charAt(0).toUpperCase()}
-                            </span>
+                            {(p.name ?? "P").charAt(0).toUpperCase()}
+                          </span>
                         }
                       </div>
                       <div className="min-w-0">
                         <p className="font-medium text-slate-900 truncate">{p.name}</p>
                         <p className="text-sm text-slate-500 truncate">{p.email}</p>
+                        {/* ── Patient ID & Copy Button ── */}
+                        <div className="flex items-center gap-2 mt-1 pt-0.5 text-xs text-slate-600">
+                          <span>Patient ID:</span>
+                          <span className="text-xs font-mono text-slate-600 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">
+                            {patientId}
+                          </span>
+
+                          {/* copy button */}
+                          <button
+                            onClick={() => copyPatientId(patientId)}
+                            className="text-slate-400 hover:text-slate-700"
+                            title="Copy Patient ID"
+                          >
+                            <Copy className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
                       </div>
                       {p.room && (
                         <Badge variant="outline" className="ml-2 flex-shrink-0">{p.room}</Badge>
