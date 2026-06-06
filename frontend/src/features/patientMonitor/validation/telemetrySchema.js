@@ -52,6 +52,23 @@ export const TelemetrySchema = z.object({
   aw:                   z.boolean().optional(),
   aa:                   z.boolean().optional(),
   al:                   z.string().nullable().optional(),
+  // ─── NEW: Alert Payload Fields
+  al: z.string().nullable().optional(),
+  fl: z.boolean().nullable().optional(),
+  fs: z.string().nullable().optional(),
+  bx: z.boolean().nullable().optional(),
+  im: z.boolean().nullable().optional(),
+  po: z.boolean().nullable().optional(),
+  dt: z.boolean().nullable().optional(),
+  rl: z.boolean().nullable().optional(),
+  mp: z.boolean().nullable().optional(),
+
+  // ─── NEW: Sleep Payload Fields
+  sa: z.boolean().nullable().optional(),
+  sg: z.string().nullable().optional(),
+  qq: z.number().nullable().optional(),
+  di: z.boolean().nullable().optional(),
+  sr: z.boolean().nullable().optional(),
 }).passthrough();
 
 /**

@@ -27,6 +27,14 @@ const FLAG_ALERT_MAP = [
   { field: "aw",        severity: "MEDIUM", message: "Patient awake — unexpected wakeup" },
   { field: "bl",        severity: "MEDIUM", message: "Device low battery" },
   { field: "high_load", severity: "LOW",    message: "Device CPU high load — readings may be delayed" },
+  // ─── NEW: Automated Alarm Dispatches via New Shortcodes
+  { field: "fl", severity: "HIGH", message: "Critical Alert: Patient fall detected!" },
+  { field: "bx", severity: "HIGH", message: "Safety Alert: Patient has exited the bed" },
+  { field: "im", severity: "MEDIUM", message: "Immobility Warning: Patient requires repositioning" },
+  { field: "dt", severity: "HIGH", message: "Clinical Warning: Physiological deterioration trend detected" },
+  { field: "mp", severity: "MEDIUM", message: "Security Notice: Multiple persons detected in zone" },
+  { field: "di", severity: "LOW", message: "Sleep Disturbance: Intermittent sleep interruption registered" }
+
 ];
 
 // ─── Hook ───────────────────────────────────────────────────────────────────
