@@ -2265,9 +2265,9 @@ async def websocket_endpoint(
 
 _ALWAYS_ALLOWED: list[str] = [
     "https://sleep-monitoring-frontend.vercel.app",
-    "http://localhost:3000",
-    "http://localhost:5173",
-    "http://localhost:8001",
+    # "http://localhost:3000",
+    # "http://localhost:5173",
+    # "http://localhost:8001",
 ]
 
 _env_origins_raw = os.environ.get("CORS_ORIGINS", "")
