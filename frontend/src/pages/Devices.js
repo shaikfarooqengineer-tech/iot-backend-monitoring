@@ -10,13 +10,13 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { toast } from "sonner";
-import { Radio, Plus, Building2, UserCheck, RotateCcw, RefreshCw } from "lucide-react";
+import { Radio, Plus, Building2, UserCheck, RotateCcw, RefreshCw, Trash2 } from "lucide-react";
 import { authFetch } from "@/utils/authFetch";
 import { usePermissions } from "@/hooks/usePermissions";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Input }  from "@/components/ui/input";
-import { Label }  from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle
@@ -54,8 +54,8 @@ export default function Devices() {
     canAssignDevices,
   } = usePermissions();
 
-  const [devices, setDevices]   = useState([]);
-  const [loading, setLoading]   = useState(true);
+  const [devices, setDevices] = useState([]);
+  const [loading, setLoading] = useState(true);
 
   // ── Register form ────────────────────────────────────────────────────────
   const [registerOpen, setRegisterOpen] = useState(false);
@@ -183,9 +183,42 @@ export default function Devices() {
     } catch { toast.error("Network error"); }
   };
 
+  //────────────DeleteDevice────────────────────────────────────
+  const handleDeleteDevice = async (deviceId) => {
+    const confirmed = window.confirm(
+      "Are you sure you want to delete this device?"
+    );
+
+    if (!confirmed) return;
+
+    try {
+      const res = await authFetch(
+        `${BACKEND_URL}/api/devices/${deviceId}`,
+        {
+          method: "DELETE",
+        }
+      );
+
+      if (res.ok) {
+        setDevices(prev =>
+          prev.filter(d => d.device_id !== deviceId)
+        );
+
+        toast.success("Device deleted successfully");
+      } else {
+        const err = await res.json().catch(() => ({
+          detail: "Delete failed"
+        }));
+        toast.error(err.detail ?? "Delete failed");
+      }
+    } catch {
+      toast.error("Network error");
+    }
+  };
+
   // ─── Computed views ──────────────────────────────────────────────────────
-  const unassigned  = devices.filter(d => !d.hospital_id);
-  const inPool      = devices.filter(d => d.hospital_id && !d.assigned_patient_id);
+  const unassigned = devices.filter(d => !d.hospital_id);
+  const inPool = devices.filter(d => d.hospital_id && !d.assigned_patient_id);
   const activeOnPat = devices.filter(d => d.assigned_patient_id);
 
   // ─── Row component ────────────────────────────────────────────────────────
@@ -242,6 +275,14 @@ export default function Devices() {
             <RotateCcw className="w-3.5 h-3.5" /> Unassign
           </Button>
         )}
+
+        <button
+          onClick={() => handleDeleteDevice(d.device_id)}
+          className="text-red-500 hover:text-red-700"
+        >
+          <Trash2 className="w-4 h-4" />
+        </button>
+
       </div>
     </div>
   );
