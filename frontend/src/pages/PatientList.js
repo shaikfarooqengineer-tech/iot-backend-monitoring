@@ -122,12 +122,14 @@ export default function PatientList() {
                       <div className="min-w-0">
                         <p className="font-medium text-slate-900 truncate">{p.name}</p>
                         <p className="text-sm text-slate-500 truncate">{p.email}</p>
-
-                        <div className="flex items-center gap-2 mt-1">
-                          <span className="text-xs font-mono text-slate-600">
-                            User ID: {patientId}
+                        {/* ── Patient ID & Copy Button ── */}
+                        <div className="flex items-center gap-2 mt-1 pt-0.5 text-xs text-slate-600">
+                          <span>Patient ID:</span>
+                          <span className="text-xs font-mono text-slate-600 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">
+                            {patientId}
                           </span>
 
+                          {/* copy button */}
                           <button
                             onClick={() => copyPatientId(patientId)}
                             className="text-slate-400 hover:text-slate-700"
