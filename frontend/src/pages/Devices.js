@@ -189,6 +189,9 @@ export default function Devices() {
       "Are you sure you want to delete this device?"
     );
 
+    console.log("confirmed =", confirmed);
+    console.log("deviceId =", deviceId);
+
     if (!confirmed) return;
 
     try {
@@ -198,6 +201,8 @@ export default function Devices() {
           method: "DELETE",
         }
       );
+
+      console.log("status =", res.status);
 
       if (res.ok) {
         setDevices(prev =>
@@ -209,9 +214,13 @@ export default function Devices() {
         const err = await res.json().catch(() => ({
           detail: "Delete failed"
         }));
+
+        console.log("error =", err);
+
         toast.error(err.detail ?? "Delete failed");
       }
-    } catch {
+    } catch (error) {
+      console.error(error);
       toast.error("Network error");
     }
   };
