@@ -1,27 +1,21 @@
 import logging
 import sys
 
-from app.config import settings
-
-
 def setup_logger() -> logging.Logger:
     logger = logging.getLogger("hospital_backend")
-
-    if logger.handlers:
-        return logger
-
-    logger.setLevel(settings.log_level)
-
+    logger.setLevel(logging.INFO)
+    
     formatter = logging.Formatter(
-        fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+        '[%(asctime)s] [%(levelname)s] [%(filename)s:%(lineno)d] - %(message)s'
     )
-
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(formatter)
-
-    logger.addHandler(handler)
-
+    
+    # Stream Handler for Standard Output
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(formatter)
+    
+    if not logger.handlers:
+        logger.addHandler(sh)
+        
     return logger
-
 
 logger = setup_logger()

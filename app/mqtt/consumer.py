@@ -1,238 +1,129 @@
 import asyncio
 import json
-import ssl
-from typing import Any
-
+import socket
+from typing import Any, Optional
 from gmqtt import Client as MQTTClient
-
 from app.config import settings
 from app.services.ingest_service import ingestion_queue
 from app.utils.logger import logger
 
-
-MQTT_TOPIC = settings.mqtt_topic
-
-
 class MQTTConsumer:
-    """
-    Async MQTT consumer for telemetry ingestion.
-    """
-
-    def __init__(self) -> None:
-        self.client = MQTTClient("hospital-backend-consumer")
+    """Async MQTT consumer for hospital telemetry ingestion."""
+    def __init__(self):
+        self.client: Optional[MQTTClient] = None
         self.connected = False
-        self.reconnect_delay = 5
-        self._configure_client()
+        self._retry_task: Optional[asyncio.Task] = None
+        self._stop_event = asyncio.Event()
 
-    def _configure_client(self) -> None:
-        """
-        Configure MQTT callbacks and authentication.
-        """
+    def on_connect(self, client, flags, rc, properties):
+        self.connected = True
+        logger.info(f"Successfully connected to MQTT broker. Result Code: {rc}")
+        client.subscribe(settings.mqtt_topic, qos=1)
+        logger.info(f"MQTT subscription active on topic pattern: {settings.mqtt_topic}")
 
-        self.client.set_auth_credentials(
-            settings.mqtt_username,
-            settings.mqtt_password
-        )
+    def on_disconnect(self, client, packet, exc=None):
+        self.connected = False
+        logger.warning(f"Disconnected from MQTT broker: {exc}")
+        if not self._stop_event.is_set():
+            logger.info("Scheduling automatic reconnection to MQTT broker...")
+            self._start_reconnect_loop()
 
+    def on_message(self, client, topic, payload, qos, properties):
+        try:
+            raw_data = json.loads(payload.decode('utf-8'))
+            if not ingestion_queue.full():
+                ingestion_queue.put_nowait({"topic": topic, "data": raw_data})
+            else:
+                logger.error(f"In-memory queue is full ({settings.queue_max_size} packets). Dropping payload from topic: {topic}")
+        except Exception as e:
+            logger.error(f"Failed to process and enqueue incoming MQTT message: {e}")
+
+    def _start_reconnect_loop(self):
+        if self._retry_task is None or self._retry_task.done():
+            self._retry_task = asyncio.create_task(self._reconnect_loop())
+
+    async def _reconnect_loop(self):
+        retries = 0
+        base_delay = 1.0
+        max_delay = 60.0
+        
+        # Configure TLS if enabled
+        connect_kwargs = {}
+        if getattr(settings, "mqtt_use_tls", False):
+            import ssl
+            connect_kwargs["ssl"] = ssl.create_default_context()
+            
+        while not self.connected and not self._stop_event.is_set():
+            retries += 1
+            delay = min(base_delay * (2 ** (retries - 1)), max_delay)
+            logger.info(f"Connecting to MQTT Broker at {settings.mqtt_host}:{settings.mqtt_port} (attempt {retries})...")
+            try:
+                # Perform DNS check (host lookup) to log explicit gaierrors before connect
+                try:
+                    socket.gethostbyname(settings.mqtt_host)
+                except socket.gaierror as dns_err:
+                    logger.error(f"DNS lookup/resolution failed for host '{settings.mqtt_host}': {dns_err}")
+                    raise dns_err
+
+                await self.client.connect(settings.mqtt_host, settings.mqtt_port, **connect_kwargs)
+                
+                # gmqtt connect is async. Wait for connection status to update to True
+                for _ in range(50):
+                    if self.connected or self._stop_event.is_set():
+                        break
+                    await asyncio.sleep(0.1)
+                
+                if self.connected:
+                    logger.info(f"MQTT connection successfully established on attempt {retries}.")
+                    return
+                else:
+                    raise ConnectionError("Handshake not completed within 5.0 seconds.")
+            except (socket.gaierror, ConnectionRefusedError, OSError, Exception) as e:
+                logger.error(f"MQTT connection attempt {retries} failed: {e}. Retrying in {delay:.1f}s...")
+                await asyncio.sleep(delay)
+
+    async def start(self):
+        """Establish the client connection and bind callback triggers."""
+        self._stop_event.clear()
+        self.client = MQTTClient("hospital_backend_ingester")
         self.client.on_connect = self.on_connect
         self.client.on_message = self.on_message
         self.client.on_disconnect = self.on_disconnect
-        self.client.on_subscribe = self.on_subscribe
-    
-    async def connect(self) -> None:
-        """
-        Connect to MQTT broker.
-        Supports:
-        - Localhost non-TLS
-        - HiveMQ TLS
-        """
+        
+        # Configure credentials if present
+        if getattr(settings, "mqtt_username", None) and getattr(settings, "mqtt_password", None):
+            self.client.set_auth_credentials(settings.mqtt_username, settings.mqtt_password)
+            
+        logger.info(f"Validating MQTT configurations:")
+        logger.info(f"  MQTT_HOST: {settings.mqtt_host}")
+        logger.info(f"  MQTT_PORT: {settings.mqtt_port}")
+        logger.info(f"  MQTT_TOPIC: {settings.mqtt_topic}")
+        logger.info(f"  MQTT_USE_TLS: {getattr(settings, 'mqtt_use_tls', False)}")
+        
+        if not settings.mqtt_host:
+            logger.error("MQTT_HOST is not configured or is empty. MQTT ingestion will not start.")
+            return
 
-        logger.info("Connecting to MQTT broker...")
+        if not (1 <= settings.mqtt_port <= 65535):
+            logger.error(f"MQTT_PORT {settings.mqtt_port} is invalid. MQTT ingestion will not start.")
+            return
 
-        connect_kwargs = {
-            "host": settings.mqtt_host,
-            "port": settings.mqtt_port,
-            "keepalive": 60
-        }
+        # Start connection process in background so startup lifecycle doesn't block
+        self._start_reconnect_loop()
 
-        # Enable TLS only if configured
-        if settings.mqtt_use_tls:
-            logger.info("TLS enabled for MQTT connection")
-
-            ssl_context = ssl.create_default_context()
-
-            connect_kwargs["ssl"] = ssl_context
-
-        await self.client.connect(**connect_kwargs)
-
-
-
-    # async def connect(self) -> None:
-    #     """
-    #     Connect to HiveMQ Cloud over TLS.
-    #     """
-
-    #     logger.info("Connecting to MQTT broker...")
-
-    #     ssl_context = ssl.create_default_context()
-
-    #     await self.client.connect(
-    #         host=settings.mqtt_host,
-    #         port=settings.mqtt_port,
-    #         ssl=ssl_context,
-    #         keepalive=60
-    #     )
-
-    async def disconnect(self) -> None:
-        """
-        Gracefully disconnect MQTT client.
-        """
-
-        logger.info("Disconnecting MQTT client...")
-
-        await self.client.disconnect()
-
-        logger.info("MQTT client disconnected")
-
-    def on_connect(
-        self,
-        client: MQTTClient,
-        flags: dict,
-        rc: int,
-        properties: Any
-    ) -> None:
-        """
-        MQTT connected callback.
-        """
-
-        self.connected = True
-
-        logger.info(
-            f"Connected to MQTT broker with result code: {rc}"
-        )
-
-        client.subscribe(MQTT_TOPIC, qos=1)
-
-        logger.info(
-            f"Subscribed to topic: {MQTT_TOPIC}"
-        )
-
-    def on_disconnect(
-        self,
-        client: MQTTClient,
-        packet,
-        exc=None
-    ) -> None:
-        """
-        MQTT disconnect callback.
-        """
-
-        self.connected = False
-
-        logger.warning(
-            "Disconnected from MQTT broker"
-        )
-
-        if exc:
-            logger.error(
-                f"Disconnect exception: {exc}"
-            )
-
-    def on_subscribe(
-        self,
-        client: MQTTClient,
-        mid: int,
-        qos: list,
-        properties: Any
-    ) -> None:
-        """
-        MQTT subscription confirmation callback.
-        """
-
-        logger.info(
-            f"Subscription successful. MID={mid}, QOS={qos}"
-        )
-
-    async def reconnect_loop(self) -> None:
-        """
-        Continuous reconnect loop.
-        """
-
-        while not self.connected:
+    async def stop(self):
+        """Gracefully unsubscribe and disconnect."""
+        self._stop_event.set()
+        if self._retry_task and not self._retry_task.done():
+            self._retry_task.cancel()
             try:
-                logger.info(
-                    "Attempting MQTT reconnection..."
-                )
-
-                await self.connect()
-
-                logger.info(
-                    "MQTT reconnection successful"
-                )
-
-                return
-
-            except Exception as exc:
-                logger.error(
-                    f"MQTT reconnect failed: {exc}"
-                )
-
-                await asyncio.sleep(
-                    self.reconnect_delay
-                )
-
-
-    async def on_message(
-        self,
-        client: MQTTClient,
-        topic: str,
-        payload: bytes,
-        qos: int,
-        properties: Any
-    ) -> None:
-        """
-        MQTT message handler.
-
-        IMPORTANT:
-        We NEVER write directly to Mongo here.
-        We only enqueue messages.
-        """
-
-        try:
-            decoded_payload = payload.decode()
-
-            logger.info(
-            f"RAW MQTT RECEIVED | topic={topic} | payload={decoded_payload}"
-        )
-
-            message = json.loads(decoded_payload)
-
-            telemetry_packet = {
-                "topic": topic,
-                "payload": message
-            }
-
-            ingestion_queue.put_nowait(telemetry_packet)
-
-            logger.info(
-                f"Telemetry queued | topic={topic}"
-            )
-
-        except asyncio.QueueFull:
-            logger.critical(
-                    "QUEUE OVERFLOW | "
-                    f"current_size={ingestion_queue.qsize()}"
-            )
-
-        except json.JSONDecodeError:
-            logger.error(
-                f"Invalid JSON received on topic: {topic}"
-            )
-
-        except Exception as exc:
-            logger.exception(
-                f"Unexpected MQTT message processing error: {exc}"
-            )
-
+                await self._retry_task
+            except asyncio.CancelledError:
+                pass
+        
+        if self.client:
+            await self.client.disconnect()
+            self.connected = False
+            logger.info("MQTT Client connection closed.")
 
 mqtt_consumer = MQTTConsumer()
