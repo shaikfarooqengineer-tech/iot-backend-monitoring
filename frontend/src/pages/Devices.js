@@ -21,7 +21,7 @@ import { Badge } from "@/components/ui/badge";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle
 } from "@/components/ui/dialog";
-
+import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 
 // ─── Status badge helper ──────────────────────────────────────────────────────
@@ -56,6 +56,9 @@ export default function Devices() {
 
   const [devices, setDevices] = useState([]);
   const [loading, setLoading] = useState(true);
+
+  const [deleteDevice, setDeleteDevice] = useState(null);
+  const [deleteLoading, setDeleteLoading] = useState(false);
 
   // ── Register form ────────────────────────────────────────────────────────
   const [registerOpen, setRegisterOpen] = useState(false);
@@ -184,44 +187,37 @@ export default function Devices() {
   };
 
   //────────────DeleteDevice────────────────────────────────────
-  const handleDeleteDevice = async (deviceId) => {
-    const confirmed = window.confirm(
-      "Are you sure you want to delete this device?"
-    );
+  const handleDeleteDevice = async () => {
+    if (!deleteDevice) return;
 
-    console.log("confirmed =", confirmed);
-    console.log("deviceId =", deviceId);
-
-    if (!confirmed) return;
+    setDeleteLoading(true);
 
     try {
       const res = await authFetch(
-        `${BACKEND_URL}/api/devices/${deviceId}`,
+        `${BACKEND_URL}/api/devices/${deleteDevice.device_id}`,
         {
           method: "DELETE",
         }
       );
 
-      console.log("status =", res.status);
-
       if (res.ok) {
         setDevices(prev =>
-          prev.filter(d => d.device_id !== deviceId)
+          prev.filter(d => d.device_id !== deleteDevice.device_id)
         );
 
         toast.success("Device deleted successfully");
+        setDeleteDevice(null);
       } else {
         const err = await res.json().catch(() => ({
-          detail: "Delete failed"
+          detail: "Delete failed",
         }));
-
-        console.log("error =", err);
 
         toast.error(err.detail ?? "Delete failed");
       }
     } catch (error) {
-      console.error(error);
       toast.error("Network error");
+    } finally {
+      setDeleteLoading(false);
     }
   };
 
@@ -286,7 +282,7 @@ export default function Devices() {
         )}
 
         <button
-          onClick={() => handleDeleteDevice(d.device_id)}
+          onClick={() => setDeleteDevice(d)}
           className="text-red-500 hover:text-red-700"
         >
           <Trash2 className="w-4 h-4" />
@@ -482,6 +478,13 @@ export default function Devices() {
           </div>
         </DialogContent>
       </Dialog>
+      <DeleteConfirmDialog
+        open={!!deleteDevice}
+        onClose={() => setDeleteDevice(null)}
+        onConfirm={handleDeleteDevice}
+        userName={deleteDevice?.device_serial}
+        loading={deleteLoading}
+      />
     </div>
   );
 }
