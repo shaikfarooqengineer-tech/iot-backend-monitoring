@@ -17,7 +17,7 @@ jmespath==1.1.0
 jq==1.11.0
 mdurl==0.1.2
 motor==3.7.1
-numpy==2.2.6
+numpy==2.4.3
 oauthlib==3.3.1
 passlib==1.7.4
 pycparser==3.0
