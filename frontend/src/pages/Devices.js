@@ -281,8 +281,7 @@ export default function Devices() {
           </Button>
         )}
 
-        <button
-          onClick={() => setDeleteDevice(d)}
+        <button variant="ghost" size="icon" onClick={() => setDeleteDevice(d)}
         >
           <Trash2 className="w-4 h-4 text-red-500" />
         </button>
