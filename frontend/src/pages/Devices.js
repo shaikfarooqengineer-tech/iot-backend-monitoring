@@ -283,9 +283,8 @@ export default function Devices() {
 
         <button
           onClick={() => setDeleteDevice(d)}
-          className="text-red-500 hover:text-red-700"
         >
-          <Trash2 className="w-4 h-4" />
+          <Trash2 className="w-4 h-4 text-red-500" />
         </button>
 
       </div>
