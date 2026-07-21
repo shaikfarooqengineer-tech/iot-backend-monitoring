@@ -62,7 +62,6 @@ async def startup_event():
 async def shutdown_event():
     """Application shutdown lifecycle."""
     logger.info("Shutting down Hospital MQTT Ingest Server...")
-    
     # 1. Stop incoming MQTT packets (MQTT Disconnect)
     logger.info("Step 1: Disconnecting MQTT client...")
     await mqtt_consumer.stop()
