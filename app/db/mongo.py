@@ -1,7 +1,10 @@
+<<<<<<< HEAD
 #  ══════════════════════════════════════════════════════════════════════════════
 # FILE: backend/app/db/mongo.py
 #  ══════════════════════════════════════════════════════════════════════════════
 
+=======
+>>>>>>> cd28364c17ac2aaabbb6853365379f34badc6f4e
 import asyncio
 from typing import Optional
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
@@ -9,18 +12,8 @@ from app.config import settings
 from app.utils.logger import logger
 
 class MongoManager:
-    """
-    Centralized async MongoDB manager.
-
-    Responsibilities:
-    - Create Mongo client
-    - Initialize collections
-    - Create indexes
-    - Provide database access
-    - Handle graceful shutdown
-    """
-
-    def __init__(self) -> None:
+    """Centralized async MongoDB manager using Motor."""
+    def __init__(self):
         self.client: Optional[AsyncIOMotorClient] = None
         self.db: Optional[AsyncIOMotorDatabase] = None
 

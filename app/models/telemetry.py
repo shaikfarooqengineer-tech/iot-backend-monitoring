@@ -1,13 +1,19 @@
+<<<<<<< HEAD
 #  ══════════════════════════════════════════════════════════════════════════════
 # FILE: backend/app/models/telemetry.py
 #  ══════════════════════════════════════════════════════════════════════════════
 
 from typing import Optional, Literal
 from pydantic import BaseModel, Field, field_validator, ConfigDict
+=======
+from typing import Optional, Literal
+from pydantic import BaseModel, Field, field_validator
+>>>>>>> cd28364c17ac2aaabbb6853365379f34badc6f4e
 from datetime import datetime
 
 class BaseTelemetry(BaseModel):
     """Common telemetry fields shared across all telemetry packets."""
+<<<<<<< HEAD
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -63,6 +69,22 @@ class BaseTelemetry(BaseModel):
     timestamp: Optional[str] = None
     patient_id: Optional[str] = None
     
+=======
+    device_id: str = Field(..., min_length=1, description="Unique identifier of physical IoT hardware")
+    patient_id: Optional[str] = Field(None, description="Optional associated clinical identifier")
+    timestamp: str = Field(..., description="ISO-8601 UTC timestamp format")
+
+    @field_validator("timestamp")
+    @classmethod
+    def validate_iso_timestamp(cls, value: str) -> str:
+        try:
+            # Validate ISO-8601 format
+            datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return value
+        except ValueError:
+            raise ValueError("Timestamp must be in valid ISO-8601 format")
+
+>>>>>>> cd28364c17ac2aaabbb6853365379f34badc6f4e
 class StatusTelemetry(BaseTelemetry):
     """Device online/offline lifecycle telemetry."""
     status: Literal["online", "offline"]

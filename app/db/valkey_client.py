@@ -1,6 +1,9 @@
+<<<<<<< HEAD
 #  ══════════════════════════════════════════════════════════════════════════════
 # FILE: backend/app/db/valkey_client.py
 #  ══════════════════════════════════════════════════════════════════════════════
+=======
+>>>>>>> cd28364c17ac2aaabbb6853365379f34badc6f4e
 import json
 import asyncio
 import valkey.asyncio as valkey

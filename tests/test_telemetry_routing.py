@@ -1,7 +1,10 @@
+<<<<<<< HEAD
 #  ══════════════════════════════════════════════════════════════════════════════
 # FILE: backend/app/tests/test_valkey_subscriber.py
 #  ══════════════════════════════════════════════════════════════════════════════
 
+=======
+>>>>>>> cd28364c17ac2aaabbb6853365379f34badc6f4e
 import asyncio
 import json
 from app.db.mongo import mongo_manager
@@ -25,6 +28,10 @@ async def test_writer_service():
                 "hr": 102.5,
                 "spo2": 98.2,
                 "temp": 36.7,
+<<<<<<< HEAD
+=======
+                "patient_id": "patient-123"
+>>>>>>> cd28364c17ac2aaabbb6853365379f34badc6f4e
             }
         },
         # Test 2: Valid integer payload on aliased vital topic format
