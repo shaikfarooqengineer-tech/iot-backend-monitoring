@@ -23,14 +23,7 @@ async def health():
         "mqtt_connected": mqtt_consumer.connected,
         "queue_size": ingestion_queue.qsize(),
         "queue_max_size": ingestion_queue.maxsize,
-<<<<<<< HEAD
-        "mongo_connected": (
-            mongo_manager.client is not None
-        ),
-        # pyrefly: ignore [parse-error]
-=======
         "mongo_connected": (mongo_manager.client is not None),
->>>>>>> cd28364c17ac2aaabbb6853365379f34badc6f4e
         "valkey_connected": (valkey_manager.client is not None)
     }
 
@@ -68,15 +61,10 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     """Application shutdown lifecycle."""
-<<<<<<< HEAD
-
-    # 1. Stop incoming MQTT packets (MQTT Disconnect)
-=======
     logger.info("Shutting down Hospital MQTT Ingest Server...")
     
     # 1. Stop incoming MQTT packets (MQTT Disconnect)
     logger.info("Step 1: Disconnecting MQTT client...")
->>>>>>> cd28364c17ac2aaabbb6853365379f34badc6f4e
     await mqtt_consumer.stop()
     
     # 2. Drain Queue
