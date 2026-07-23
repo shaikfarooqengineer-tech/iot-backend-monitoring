@@ -9,20 +9,22 @@ import { z } from "zod";
 /**
  * TelemetrySchema — matches the raw MongoDB telemetry document exactly.
  * Every field is nullable/optional because any given packet may omit fields.
+ * Schema relaxed on event_id, device_type, and device_id to safely support
+ * offline fallback/empty packets without discarding validation runs.
  */
 export const TelemetrySchema = z.object({
   _id:                  z.any().optional(),
-  event_id:             z.string(),
-  device_type:          z.string(),
-  device_id:            z.string(),
+  event_id:             z.string().optional(), // 🌟 Made optional to support offline envelopes
+  device_type:          z.string().nullable().optional(), // 🌟 Made optional to support offline envelopes
+  device_id:            z.string().optional(), // 🌟 Made optional to support offline envelopes
   source:               z.enum(["live", "empty", "stale"]).optional(),
   no_device:            z.boolean().optional(),
-  firmware:             z.string().nullable().optional(),
+  firmware:             z.union([z.string(), z.number()]).nullable().optional(),
   client_id:            z.string().nullable().optional(),
   status:               z.string().nullable().optional(),
   uptime_ms:            z.number().nullable().optional(),
-  ts:                   z.object({ $numberLong: z.string() }).optional(),
-  epoch:                z.number().optional(),
+  ts:                   z.union([z.number(), z.object({ $numberLong: z.string() })]).nullable().optional(),
+  epoch:                z.number().nullable().optional(),
   iso_timestamp:        z.string().optional(),
   human_detected:       z.boolean().nullable().optional(),
   distance:             z.number().nullable().optional(),
@@ -52,24 +54,24 @@ export const TelemetrySchema = z.object({
   aw:                   z.boolean().optional(),
   aa:                   z.boolean().optional(),
   al:                   z.string().nullable().optional(),
-  // ─── NEW: Alert Payload Fields
-  al: z.string().nullable().optional(),
-  fl: z.boolean().nullable().optional(),
-  fs: z.string().nullable().optional(),
-  bx: z.boolean().nullable().optional(),
-  im: z.boolean().nullable().optional(),
-  po: z.boolean().nullable().optional(),
-  dt: z.boolean().nullable().optional(),
-  rl: z.boolean().nullable().optional(),
-  mp: z.boolean().nullable().optional(),
 
-  // ─── NEW: Sleep Payload Fields
-  sa: z.boolean().nullable().optional(),
-  sg: z.string().nullable().optional(),
-  qq: z.number().nullable().optional(),
-  di: z.boolean().nullable().optional(),
-  sr: z.boolean().nullable().optional(),
-}).passthrough();
+  // ─── Alert Payload Fields ───
+  fl:                   z.boolean().nullable().optional(),
+  fs:                   z.string().nullable().optional(),
+  bx:                   z.boolean().nullable().optional(),
+  im:                   z.boolean().nullable().optional(),
+  po:                   z.boolean().nullable().optional(),
+  dt:                   z.boolean().nullable().optional(),
+  rl:                   z.boolean().nullable().optional(),
+  mp:                   z.boolean().nullable().optional(),
+
+  // ─── Sleep Payload Fields ───
+  sa:                   z.boolean().nullable().optional(),
+  sg:                   z.string().nullable().optional(),
+  qq:                   z.number().nullable().optional(),
+  di:                   z.union([z.boolean(), z.number()]).nullable().optional(),
+  sr:                   z.boolean().nullable().optional(),
+}).passthrough(); // Passthrough remains as final structural safety net
 
 /**
  * parsePacket — validate a raw JSON payload against TelemetrySchema.
@@ -80,6 +82,9 @@ export function parsePacket(raw) {
   const result = TelemetrySchema.safeParse(raw);
   if (result.success) {
     return { success: true, data: result.data };
+  } else {
+    console.error("🚨 Zod Validation Failed:", result.error.format());
+    console.warn("📦 Dropped Payload:", raw);
+    return { success: false, error: result.error };
   }
-  return { success: false, error: result.error.issues };
 }

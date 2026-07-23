@@ -58,7 +58,7 @@ export default function AuthCallback() {
     };
 
     processSession();
-  }, [navigate]);
+  }, [navigate, saveToken, setUser]);
 
   return (
     <div className="min-h-screen flex items-center justify-center">

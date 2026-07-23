@@ -127,10 +127,20 @@ export function useConnectionManager(patientId) {
   // Callback ref for validated doc — set by parent
   const onDocReceived      = useRef(null);
 
+  // Refs to break circular dependency between connectWebSocket and handleWsFailure
+  const connectWebSocketRef = useRef(null);
+  const handleWsFailureRef  = useRef(null);
+
   const log = useRef(createLogger(patientId, docRef)).current;
 
   // Keep tokenRef fresh
   useEffect(() => { tokenRef.current = token; }, [token]);
+
+  // Keep refs updated with current callbacks to prevent stale closures and circular dependency rebuilds
+  useEffect(() => {
+    connectWebSocketRef.current = connectWebSocket;
+    handleWsFailureRef.current = handleWsFailure;
+  });
 
   const resolveToken = useCallback(() => {
     return tokenRef.current || localStorage.getItem("session_token");
@@ -322,7 +332,7 @@ export function useConnectionManager(patientId) {
       ws = new WebSocket(wsUrl);
     } catch (err) {
       log.error("ws_connect_attempt", { error: err.message });
-      handleWsFailure(err.message);
+      if (handleWsFailureRef.current) handleWsFailureRef.current(err.message);
       return;
     }
 
@@ -334,7 +344,7 @@ export function useConnectionManager(patientId) {
       if (ws.readyState !== WebSocket.OPEN) {
         log.warn("ws_closed", { reason: `Connect timeout after ${WS_CONNECT_TIMEOUT_MS}ms` });
         ws.close();
-        handleWsFailure("Connection timed out");
+        if (handleWsFailureRef.current) handleWsFailureRef.current("Connection timed out");
       }
     }, WS_CONNECT_TIMEOUT_MS);
 
@@ -368,7 +378,7 @@ export function useConnectionManager(patientId) {
         if (isMounted.current) {
           log.warn("ws_auth_failed", { reason: "Auth timeout" });
           ws.close(4001, "Auth timeout");
-          handleWsFailure("Auth response timed out");
+          if (handleWsFailureRef.current) handleWsFailureRef.current("Auth response timed out");
         }
       }, WS_AUTH_TIMEOUT_MS);
     };
@@ -441,7 +451,7 @@ export function useConnectionManager(patientId) {
         return;
       }
 
-      handleWsFailure(`Closed: code=${event.code}`);
+      if (handleWsFailureRef.current) handleWsFailureRef.current(`Closed: code=${event.code}`);
     };
   }, [patientId, startPolling, processPacket, startHeartbeat, log, toastOnce, resolveToken]);
 
@@ -467,8 +477,12 @@ export function useConnectionManager(patientId) {
     dispatch({ type: "RETRY", message: `Reconnecting in ${Math.round(delay / 1000)}s… (${reason})` });
 
     clearTimeout(reconnectTimeout.current);
-    reconnectTimeout.current = setTimeout(connectWebSocket, delay);
-  }, [startPolling, log, connectWebSocket]);
+    reconnectTimeout.current = setTimeout(() => {
+      if (connectWebSocketRef.current) {
+        connectWebSocketRef.current();
+      }
+    }, delay);
+  }, [startPolling, log]);
 
   // ─── Manual retry ──────────────────────────────────────────────────────
 

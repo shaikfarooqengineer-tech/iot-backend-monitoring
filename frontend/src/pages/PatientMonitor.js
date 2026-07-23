@@ -11,7 +11,7 @@
 // ARCHITECTURE:
 //   - useConnectionManager: WS + polling + auth + heartbeat + staleness
 //   - useTelemetryProcessor: chart history + alert log accumulation
-//   - 12 React.memo components with narrow prop signatures
+//   - Resilient, cross-env environment variable resolver
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { useEffect } from "react";
@@ -37,6 +37,51 @@ import SleepCard       from "@/features/patientMonitor/components/SleepCard";
 import ActivityCard    from "@/features/patientMonitor/components/ActivityCard";
 import DeviceCard      from "@/features/patientMonitor/components/DeviceCard";
 import FooterBar       from "@/features/patientMonitor/components/FooterBar";
+
+// ─── Utility: Cross-Environment Variable Resolver ──────────────────────────
+
+const getEnvVar = (key, defaultValue) => {
+  try {
+    if (typeof import.meta !== "undefined" && import.meta.env && import.meta.env[key]) {
+      return import.meta.env[key];
+    }
+  } catch (e) {}
+  try {
+    if (typeof process !== "undefined" && process.env && process.env[key]) {
+      return process.env[key];
+    }
+  } catch (e) {}
+  return defaultValue;
+};
+
+// ─── Utility: Absolute Backend URL Resolver ───────────────────────────────
+
+const resolveBackendUrl = () => {
+  let httpUrl = getEnvVar("VITE_BACKEND_URL", getEnvVar("REACT_APP_BACKEND_URL", ""));
+
+  if (!httpUrl && typeof window !== "undefined") {
+    const { protocol, hostname, port } = window.location;
+    // Auto-detect development loops on local machines or local networks
+    if (
+      hostname === "localhost" || 
+      hostname === "127.0.0.1" || 
+      hostname.startsWith("192.168.") || 
+      hostname.startsWith("10.") || 
+      hostname.startsWith("172.") ||
+      port === "3000" || 
+      port === "3001" || 
+      port === "5173" || 
+      port === "8080"
+    ) {
+      httpUrl = `${protocol}//${hostname}:8000`; // Points cleanly to local FastAPI backends
+    } else {
+      httpUrl = window.location.origin;
+    }
+  }
+  return httpUrl.replace(/\/$/, "");
+};
+
+const BACKEND_URL = resolveBackendUrl();
 
 // ─── Relative Telemetry Age Tracker (Phase 4 Task 3) ─────────────────────────
 
@@ -79,7 +124,9 @@ export default function PatientMonitor() {
 
   // Wire: connection manager → telemetry processor
   useEffect(() => {
-    onDocReceived.current = processDoc;
+    if (onDocReceived) {
+      onDocReceived.current = processDoc;
+    }
   }, [processDoc, onDocReceived]);
 
   // ─── Load Historical Records on Mount (Phase 4 Task 1) ─────────────────────
@@ -87,11 +134,10 @@ export default function PatientMonitor() {
     let active = true;
     const loadHistory = async () => {
       try {
-        const backendUrl = (process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "");
-        const res = await authFetch(`${backendUrl}/api/patients/${patientId}/telemetry-history`);
+        const res = await authFetch(`${BACKEND_URL}/api/patients/${patientId}/telemetry-history`);
         if (res.ok && active) {
           const data = await res.json();
-          initializeHistory(data.history);
+          initializeHistory(data.history || []);
         }
       } catch (err) {
         console.error("Failed loading historical telemetry records:", err);
@@ -104,7 +150,17 @@ export default function PatientMonitor() {
     return () => { active = false; };
   }, [patientId, initializeHistory]);
 
-  // ─── Loading / Error / 3-State branching screen ────────────────────────
+  // ─── Loading / Hydration Guard State ────────────────────────────────────
+  if (!patientId) {
+    return (
+      <div className="flex items-center justify-center min-h-[60vh]">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4" />
+          <p className="text-slate-500 dark:text-slate-400 text-sm">Loading patient profile…</p>
+        </div>
+      </div>
+    );
+  }
 
   // State A: No device assigned
   if (connectionDoc?.source === "empty" && connectionDoc?.no_device) {
@@ -206,7 +262,7 @@ export default function PatientMonitor() {
     );
   }
 
-  // ─── Derive props from validated doc ───────────────────────────────────
+  // ─── Derive props from validated doc (with defensive nullish guards) ───
   const alertLevel = getAlertLevel(liveDoc);
 
   // Status flags - Must be connected/polling AND the current stream source must be live
@@ -224,10 +280,10 @@ export default function PatientMonitor() {
       {/* ── Header ── */}
       <div className="flex items-center justify-between flex-wrap gap-3">
         <PageHeader
-          deviceId={liveDoc.device_id}
-          roomId={liveDoc.room_id}
-          siteId={liveDoc.site_id}
-          deviceType={liveDoc.device_type}
+          deviceId={liveDoc.device_id ?? ""}
+          roomId={liveDoc.room_id ?? ""}
+          siteId={liveDoc.site_id ?? ""}
+          deviceType={liveDoc.device_type ?? ""}
           alertLevel={alertLevel}
         />
         <ConnectionBadge
@@ -272,29 +328,29 @@ export default function PatientMonitor() {
         </div>
       </div>
 
-      {/* ── Vitals Grid (6 cards) ── */}
+      {/* ── Vitals Grid (6 cards) with robust physical schema translation fallbacks ── */}
       <VitalsGrid
-        hr={liveDoc.hr}
-        br={liveDoc.br}
-        spo2={liveDoc.spo2}
-        bp={liveDoc.bp}
-        temp={liveDoc.temp}
-        sleeping={liveDoc.sleeping}
-        humanDetected={liveDoc.human_detected}
-        sleepQuality={liveDoc.sleep_quality}
-        heartbeatConfidence={liveDoc.heartbeat_confidence}
-        breathConfidence={liveDoc.breath_confidence}
+        hr={liveDoc.hr ?? null}
+        br={liveDoc.br ?? liveDoc.rr ?? null} // Translates both rr and br models safely
+        spo2={liveDoc.spo2 ?? liveDoc.bh ?? null} // Translates both bh and spo2 fields safely
+        bp={liveDoc.bp ?? liveDoc.bb ?? null} // Translates both bb and blood pressure safely
+        temp={liveDoc.temp ?? null}
+        sleeping={liveDoc.sleeping ?? false}
+        humanDetected={liveDoc.human_detected ?? false}
+        sleepQuality={liveDoc.sleep_quality ?? null}
+        heartbeatConfidence={liveDoc.heartbeat_confidence ?? null}
+        breathConfidence={liveDoc.breath_confidence ?? null}
       />
 
       {/* ── Room Status & Alerts ── */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <RoomStatusCard
-          lux={liveDoc.lux}
-          temp={liveDoc.temp}
-          distance={liveDoc.distance}
-          humanDetected={liveDoc.human_detected}
-          siteId={liveDoc.site_id}
-          roomId={liveDoc.room_id}
+          lux={liveDoc.lux ?? null}
+          temp={liveDoc.temp ?? null}
+          distance={liveDoc.distance ?? null}
+          humanDetected={liveDoc.human_detected ?? false}
+          siteId={liveDoc.site_id ?? ""}
+          roomId={liveDoc.room_id ?? ""}
         />
         <AlertPanel alertLog={alertLog} />
       </div>
@@ -303,45 +359,45 @@ export default function PatientMonitor() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <HrChartPanel
           hrHistory={hrHistory}
-          heartbeatConfidence={liveDoc.heartbeat_confidence}
+          heartbeatConfidence={liveDoc.heartbeat_confidence ?? null}
         />
         <RrChartPanel
           rrHistory={rrHistory}
-          breathConfidence={liveDoc.breath_confidence}
+          breathConfidence={liveDoc.breath_confidence ?? null}
         />
       </div>
 
       {/* ── Bottom Row ── */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <SleepCard
-          sleeping={liveDoc.sleeping}
-          sleepQuality={liveDoc.sleep_quality}
-          humanDetected={liveDoc.human_detected}
-          confidence={liveDoc.confidence}
+          sleeping={liveDoc.sleeping ?? false}
+          sleepQuality={liveDoc.sleep_quality ?? null}
+          humanDetected={liveDoc.human_detected ?? false}
+          confidence={liveDoc.confidence ?? null}
         />
         <ActivityCard
-          humanDetected={liveDoc.human_detected}
-          distance={liveDoc.distance}
-          highLoad={liveDoc.high_load}
-          uptimeMs={liveDoc.uptime_ms}
+          humanDetected={liveDoc.human_detected ?? false}
+          distance={liveDoc.distance ?? null}
+          highLoad={liveDoc.high_load ?? false}
+          uptimeMs={liveDoc.uptime_ms ?? 0}
         />
         <DeviceCard
-          deviceId={liveDoc.device_id}
-          firmware={liveDoc.firmware}
-          deviceType={liveDoc.device_type}
-          bs={liveDoc.bs}
-          bl={liveDoc.bl}
-          highLoad={liveDoc.high_load}
-          status={liveDoc.status}
-          schema={liveDoc.schema}
+          deviceId={liveDoc.device_id ?? ""}
+          firmware={liveDoc.firmware ?? liveDoc.fw ?? ""} // Aligns both fw and firmware versions cleanly
+          deviceType={liveDoc.device_type ?? ""}
+          bs={liveDoc.bs ?? 0}
+          bl={liveDoc.bl ?? 0}
+          highLoad={liveDoc.high_load ?? false}
+          status={liveDoc.status ?? ""}
+          schema={liveDoc.schema ?? ""}
         />
       </div>
 
       {/* ── Footer ── */}
       <FooterBar
         lastUpdate={lastUpdate}
-        isoTimestamp={liveDoc.iso_timestamp}
-        eventId={liveDoc.event_id}
+        isoTimestamp={liveDoc.iso_timestamp ?? liveDoc.iso ?? ""}
+        eventId={liveDoc.event_id ?? ""}
         connState={connState}
       />
     </div>

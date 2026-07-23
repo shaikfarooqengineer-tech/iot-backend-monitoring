@@ -1,25 +1,33 @@
-from fastapi import status
+# ══════════════════════════════════════════════════════════════════════════════
+# FILE: backend/server.py
+# IMPLEMENTATION: Main backend gateway managing authentication, device provisioning, 
+# and a WebSocket-first event-driven push architecture with Redis-ready event routing.
+# ══════════════════════════════════════════════════════════════════════════════
+
+from fastapi import status, Query, Depends, FastAPI, APIRouter, WebSocket, WebSocketDisconnect, Request, Response, HTTPException
 from starlette.concurrency import run_in_threadpool
-from pymongo.errors import DuplicateKeyError
-from fastapi import Query
-from fastapi import Depends
-from fastapi import FastAPI, APIRouter, WebSocket, WebSocketDisconnect, Request, Response, HTTPException
+from pymongo.errors import DuplicateKeyError, DuplicateKeyError as MongoDuplicateKeyError
+from motor.motor_asyncio import AsyncIOMotorClient
 from datetime import datetime, timezone, timedelta
+from pydantic import BaseModel, Field, ConfigDict
+from typing import List, Optional, Dict, Set
+from collections import defaultdict
+from enum import Enum
+from pathlib import Path
+from valkey.exceptions import TimeoutError  # Used for catching PubSub timeouts safely
 import bcrypt
 import httpx
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
-from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict
-from typing import List, Optional
 import uuid
 import asyncio
 import random
 import json
-from enum import Enum
+
+import valkey.asyncio as valkey
+from db.valkey_client import valkey_manager
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -65,30 +73,102 @@ app = FastAPI()
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
 
-# WebSocket connection manager
+
+# ══════════════════════════════════════════════════════════════════════════════
+# EVENT BUS & PATIENT ROOM CONNECTION MANAGER
+# ══════════════════════════════════════════════════════════════════════════════
+
 class ConnectionManager:
+    """
+    O(1) Connection Manager utilizing targeted patient rooms.
+    Elimates global connection scans and isolates data delivery.
+    """
     def __init__(self):
-        self.active_connections: List[WebSocket] = []
+        # Maps patient_id -> set of active WebSockets
+        self.patient_connections: Dict[str, Set[WebSocket]] = defaultdict(set)
 
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-        logger.info(f"WebSocket connected. Total connections: {len(self.active_connections)}")
+    # ──────────────────────────────────────────────────────────────────────────
+    # Core Patient-Centric Logic & Implementations
+    # ──────────────────────────────────────────────────────────────────────────
+    async def connect_patient(self, patient_id: str, websocket: WebSocket):
+        """
+        Directly registers and accepts a WebSocket connection for the specified Patient ID.
+        """
+        self.patient_connections[patient_id].add(websocket)
+        logger.info(
+            f"WebSocket connection established for Patient: {patient_id}. "
+            f"Active connections for this patient: {len(self.patient_connections[patient_id])}"
+        )
 
-    def disconnect(self, websocket: WebSocket):
-        if websocket in self.active_connections:
-            self.active_connections.remove(websocket)
-        logger.info(f"WebSocket disconnected. Total connections: {len(self.active_connections)}")
+    def disconnect_patient(self, patient_id: str, websocket: WebSocket):
+        """
+        Safely removes a WebSocket connection matching the specified Patient ID.
+        Cleans up key allocations once all connections are closed.
+        """
+        if patient_id in self.patient_connections:
+            self.patient_connections[patient_id].discard(websocket)
+            if not self.patient_connections[patient_id]:
+                del self.patient_connections[patient_id]
+        logger.info(f"WebSocket connection closed for Patient: {patient_id}.")
 
-    async def broadcast(self, message: dict):
-        # OPTIMIZATION: Use asyncio.gather to broadcast concurrently
+    async def broadcast_to_patient(self, patient_id: str, message: dict):
+        """
+        Directly broadcasts JSON telemetry payloads to all listeners for a given Patient ID.
+        Identifies and prunes stale/dead connections in real-time.
+        """
+        if patient_id not in self.patient_connections:
+            return
+
+        stale_connections: Set[WebSocket] = set()
         tasks = []
-        for connection in self.active_connections:
-            tasks.append(connection.send_json(message))
+
+        # Iterate over a copied list to prevent set modification errors during runtime
+        active_viewers = list(self.patient_connections[patient_id])
+
+        for connection in active_viewers:
+            async def safe_send(conn: WebSocket = connection):
+                try:
+                    await conn.send_json(message)
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to stream JSON to WebSocket for Patient {patient_id}: {e}"
+                    )
+                    stale_connections.add(conn)
+
+            tasks.append(safe_send())
+
         if tasks:
+            # Gather tasks concurrently; do not let single client errors abort other broadcasts
             await asyncio.gather(*tasks, return_exceptions=True)
 
+        # Dynamic pruning: Clean up stale connections discovered during the transmission loop
+        for dead_conn in stale_connections:
+            self.disconnect_patient(patient_id, dead_conn)
+
+# Global Instance
 manager = ConnectionManager()
+
+
+class EventBusBackend:
+    """Interface class designed for future horizontal clustering (Redis Pub/Sub, Kafka, etc.)"""
+    async def publish(self, patient_id: str, payload: dict):
+        raise NotImplementedError()
+
+
+class TelemetryEventBus(EventBusBackend):
+    """
+    Core event distribution layer managing patient streams in-memory with ultra-low latency.
+    """
+    def __init__(self, connection_manager: ConnectionManager):
+        self.cm = connection_manager
+
+    async def publish(self, patient_id: str, payload: dict):
+        # DIRECT EVENT -> WS PUSH: Broadcast immediately
+        await self.cm.broadcast_to_patient(patient_id, payload)
+
+# Global event bus singleton mapped to our socket rooms
+event_bus = TelemetryEventBus(manager)
+
 
 # ─── Health Monitoring Models ─────────────────────────────────────────────────
 
@@ -501,18 +581,31 @@ async def send_email(to_email: str, subject: str, html_content: str):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PHASE 2 — DEVICE SERVICE HELPERS
+# AWS-SCALABLE VALKEY CACHE INVALIDATION
 # ══════════════════════════════════════════════════════════════════════════════
 
-from pymongo.errors import DuplicateKeyError as MongoDuplicateKeyError
+async def invalidate_device_cache(device_serial: str):
+    """
+    Clears the distributed Valkey cache whenever a device is assigned or unassigned.
+    Forces all AWS nodes/containers to pull the fresh assignment from MongoDB.
+    """
+    if valkey_manager.client:
+        try:
+            await valkey_manager.client.delete(f"route:{device_serial}")
+            logger.info(f"Cleared distributed routing cache for device: {device_serial}")
+        except Exception as e:
+            logger.error(f"Failed to clear cache for {device_serial}: {e}")
 
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE 2 — DEVICE SERVICE HELPERS & REAL-TIME CACHING
+# ══════════════════════════════════════════════════════════════════════════════
 
-# OPTIMIZATION: Executes independent queries concurrently to minimize execution latency
+# OPTIMIZATION: Ultra-fast O(1) Memory Resolve pulling exclusively from Valkey
 async def resolve_telemetry(patient_id: str) -> dict:
     """
-    Pure read function — queries separate vitals, sleep, and alerts collections
-    inside telemetry_db (vitals_monitoring) database concurrently, aggregates their latest records,
-    and maps the IoT device properties to match the frontend telemetry contract.
+    Queries Valkey memory cache for real-time vitals, sleep, and alerts.
+    Falls back to concurrent MongoDB queries if the cache expires.
+    Injects precise online/offline status dynamically without database polling.
     """
     if db is None or telemetry_db is None:
         return {
@@ -537,12 +630,42 @@ async def resolve_telemetry(patient_id: str) -> dict:
     device_serial = device["device_serial"]
     device_type = device.get("device_type") or "sleep_monitor"
 
-    # OPTIMIZATION: Runs all 3 queries concurrently instead of waiting sequentially.
-    vitals_task = telemetry_db.vitals.find_one({"device_id": device_serial}, sort=[("ts", -1)], projection={"_id": 0})
-    sleep_task = telemetry_db.sleep.find_one({"device_id": device_serial}, sort=[("ts", -1)], projection={"_id": 0})
-    alerts_task = telemetry_db.alerts.find_one({"device_id": device_serial}, sort=[("ts", -1)], projection={"_id": 0})
+    vitals_doc, sleep_doc, alerts_doc = None, None, None
 
-    vitals_doc, sleep_doc, alerts_doc = await asyncio.gather(vitals_task, sleep_task, alerts_task)
+    # 1. OPTIMIZATION: Ultra-fast RAM MGET for completely reducing Dashboard Latency
+    if valkey_manager.client:
+        try:
+            keys = [
+                f"telemetry:vitals:{device_serial}",
+                f"telemetry:sleep:{device_serial}",
+                f"telemetry:alerts:{device_serial}"
+            ]
+            cached_vals = await valkey_manager.client.mget(keys)
+            if cached_vals[0]: vitals_doc = json.loads(cached_vals[0])
+            if cached_vals[1]: sleep_doc = json.loads(cached_vals[1])
+            if cached_vals[2]: alerts_doc = json.loads(cached_vals[2])
+        except Exception as e:
+            logger.warning(f"Valkey cache read failed for {device_serial}: {e}")
+
+    # 2. OPTIMIZATION: Run concurrent MongoDB Fallback Queries if Cache is completely empty
+    if not vitals_doc and not sleep_doc and not alerts_doc:
+        vitals_task = telemetry_db.vitals.find_one({"device_id": device_serial}, sort=[("ts", -1)], projection={"_id": 0})
+        sleep_task = telemetry_db.sleep.find_one({"device_id": device_serial}, sort=[("ts", -1)], projection={"_id": 0})
+        alerts_task = telemetry_db.alerts.find_one({"device_id": device_serial}, sort=[("ts", -1)], projection={"_id": 0})
+
+        vitals_doc, sleep_doc, alerts_doc = await asyncio.gather(vitals_task, sleep_task, alerts_task)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # CRITICAL DEPENDENCY: DYNAMIC MONGO/VALKEY UNWRAPPING GUARD
+    # If the documents are wrapped in our Event Envelope pattern, we unwrap them
+    # concurrently here to ensure extraction logic and chart history remain 100% flat.
+    # ──────────────────────────────────────────────────────────────────────────
+    if vitals_doc and "payload" in vitals_doc:
+        vitals_doc = {**vitals_doc["payload"], "event_type": vitals_doc.get("event_type"), "device_id": vitals_doc.get("device_id") or device_serial}
+    if sleep_doc and "payload" in sleep_doc:
+        sleep_doc = {**sleep_doc["payload"], "event_type": sleep_doc.get("event_type"), "device_id": sleep_doc.get("device_id") or device_serial}
+    if alerts_doc and "payload" in alerts_doc:
+        alerts_doc = {**alerts_doc["payload"], "event_type": alerts_doc.get("event_type"), "device_id": alerts_doc.get("device_id") or device_serial}
 
     # Trigger safe early return overlay if no telemetry frames exist across any collection
     if not vitals_doc and not sleep_doc and not alerts_doc:
@@ -551,7 +674,8 @@ async def resolve_telemetry(patient_id: str) -> dict:
             "no_device": False,
             "device_serial": device_serial,
             "device_type": device_type,
-            "reason": "Device assigned but no telemetry received yet"
+            "reason": "Device assigned but no telemetry received yet",
+            "is_online": False
         }
 
     # Extract clean epochs from MongoDB Int64 / $numberLong representations (millis vs seconds)
@@ -582,32 +706,48 @@ async def resolve_telemetry(patient_id: str) -> dict:
 
     iso_timestamp = datetime.fromtimestamp(max_epoch, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    # Construct the primary normalized flat dictionary template
+    # 3. OPTIMIZATION: Real-time latency check for TRUE online/offline Status Tracking
+    current_epoch = int(datetime.now(timezone.utc).timestamp())
+    is_online = (current_epoch - max_epoch) < 60  # Marked Offline if silent for 60 seconds
+
+    # Map fields safely into the frontend contract dictionary
     merged = {
         "device_id": device_serial,
         "device_type": device_type,  
         "epoch": max_epoch,
         "iso_timestamp": iso_timestamp,
         "schema": "vitals",
-        "hr": 0,
-        "br": 0,
-        "di": 0.0,
-        "lx": 0.0,
-        "bb": 100,
-        "hu": False,
-        "hh": False,
-        "bl": False,
-        "uptime_ms": 0,
-        "event_id": f"event_{max_epoch}",
-        "site_id": "HOSPITAL_01",
-        "room_id": "ROOM_101",
-        "sg": "UNKNOWN",
-        "qq": 0,
-        "sa": False,
-        "sr": False,
+        "is_online": is_online,
+        
+        # Existing Vital Fields...
+        "hr": vitals_doc.get("hr") if vitals_doc else None,
+        "br": vitals_doc.get("br") if vitals_doc and vitals_doc.get("br") is not None else (vitals_doc.get("rr") if vitals_doc else None),
+        "bp": vitals_doc.get("bp") if vitals_doc and vitals_doc.get("bp") is not None else ({"systolic": vitals_doc.get("sys"), "diastolic": vitals_doc.get("dia")} if vitals_doc and (vitals_doc.get("sys") is not None or vitals_doc.get("dia") is not None) else None),
+        "temp": vitals_doc.get("temp") if vitals_doc else None,
+        "spo2": vitals_doc.get("spo2") if vitals_doc and vitals_doc.get("spo2") is not None else (vitals_doc.get("bh") if vitals_doc else None),
+        "lx": vitals_doc.get("lux") if vitals_doc and vitals_doc.get("lux") is not None else (vitals_doc.get("lx", 0.0) if vitals_doc else 0.0),
+        "human_detected": vitals_doc.get("human_detected") if vitals_doc and vitals_doc.get("human_detected") is not None else (vitals_doc.get("hu", False) if vitals_doc else False),
+        "distance": vitals_doc.get("distance") if vitals_doc and vitals_doc.get("distance") is not None else (vitals_doc.get("di", 0.0) if vitals_doc else 0.0),
+        "uptime_ms": vitals_doc.get("uptime_ms", 0) if vitals_doc else 0,
+        
+        # Alert Payload Fields Mapping
+        "al": alerts_doc.get("al", "OK") if alerts_doc else "OK",
+        "fl": alerts_doc.get("fl", False) if alerts_doc else False,
+        "fs": alerts_doc.get("fs", "NONE") if alerts_doc else "NONE",
+        "bx": alerts_doc.get("bx", False) if alerts_doc else False,
+        "im": alerts_doc.get("im", False) if alerts_doc else False,
+        "po": alerts_doc.get("po", False) if alerts_doc else False,
+        "dt": alerts_doc.get("dt", False) if alerts_doc else False,
+        "rl": alerts_doc.get("rl", False) if alerts_doc else False,
+        "mp": alerts_doc.get("mp", False) if alerts_doc else False,
+        
+        # Sleep Payload Fields Mapping
+        "sa": sleep_doc.get("sa", False) if sleep_doc else False,
+        "sg": sleep_doc.get("sg", "UNKNOWN") if sleep_doc else "UNKNOWN",
+        "qq": sleep_doc.get("qq") if sleep_doc else (sleep_doc.get("bb") if sleep_doc else None),
+        "di": sleep_doc.get("di", False) if sleep_doc else False,
+        "sr": sleep_doc.get("sr", False) if sleep_doc else False,
         "sleeping": False,
-        "fl": False,
-        "al": None,
     }
 
     # Order our available collection documents chronologically to overlay values sequentially
@@ -649,9 +789,12 @@ async def resolve_telemetry(patient_id: str) -> dict:
     if "sg" in merged:
         merged["sleeping"] = merged["sg"] != "AWAKE"
 
-    merged["heartbeat_confidence"] = float(merged.get("heartbeat_confidence", 90.0))
-    merged["breath_confidence"] = float(merged.get("breath_confidence", 85.0))
-    merged["confidence"] = float(merged.get("confidence", 0.95))
+    merged["heartbeat_confidence"] = float(merged.get("heartbeat_confidence", merged.get("cf", 90.0)))
+    merged["breath_confidence"] = float(merged.get("breath_confidence", merged.get("cf", 85.0)))
+    merged["confidence"] = float(merged.get("confidence", merged.get("cf", 0.95)))
+    
+    if "sleep_quality" not in merged and "sq" in merged:
+        merged["sleep_quality"] = merged["sq"]
     merged["source"] = "live"
     merged["no_device"] = False
 
@@ -792,7 +935,7 @@ async def register_admin(admin_data: AdminRegister, response: Response):
             {"role": UserRole.SUPERADMIN.value},
             {"username": admin_data.username}
         ]
-    })    
+    })   
     
     if existing_check:
         if existing_check.get("role") == UserRole.SUPERADMIN.value:
@@ -917,6 +1060,7 @@ async def login(login_data: LoginRequest, response: Response):
     return user_response
 
 # ────── Auth Routes/Create User ───────────────────────────────────────────
+@api_router.post("/api/auth/create-user")
 @api_router.post("/auth/create-user")
 async def create_team_member(user_data: UserCreate, request: Request):
     current_user = await get_current_user(request)
@@ -1071,16 +1215,6 @@ async def admin_reset_password(request: Request):
     return {"message": f"Password reset successfully for {target_user['name']}"}
 
 # ───────────── Auth Routes/password-reset-request ──────────────────────────────
-# Password Reset Request - generates token for self-service reset
-class PasswordResetRequest(BaseModel):
-    username: str
-
-
-class PasswordResetConfirm(BaseModel):
-    token: str
-    new_password: str
-
-
 @api_router.post("/auth/request-password-reset")
 async def request_password_reset(reset_request: PasswordResetRequest):
     # Find user by username OR email
@@ -1090,7 +1224,6 @@ async def request_password_reset(reset_request: PasswordResetRequest):
         user = await db.users.find_one({"email": reset_request.username}, {"_id": 0})
     
     if not user:
-        # Return success even if user not found (security - don't reveal if username exists)
         return {"message": "If this email/username exists, a reset token has been generated. Please contact your administrator for the token."}
     
     # Generate reset token
@@ -1461,7 +1594,7 @@ async def delete_user(user_id: str, request: Request):
     return {"message": "User deleted successfully"}
 
  
-# ─────── User Management delete user ─────────────
+# ─────── User Management details ─────────────
 @api_router.get("/users/{user_id}", response_model=User)
 async def get_user(user_id: str, request: Request):
     current_user = await get_current_user(request)
@@ -1648,9 +1781,7 @@ async def assign_hospital(
 
 @api_router.patch("/devices/{device_id}/assign-patient")
 async def assign_patient(device_id: str, body: DeviceAssignToPatient, request: Request):
-    """
-    Assign a device to a patient.
-    """
+    """Assign a device to a patient."""
     current_user = await get_current_user(request)
     can_assign_devices_check(current_user)
 
@@ -1706,6 +1837,9 @@ async def assign_patient(device_id: str, body: DeviceAssignToPatient, request: R
         f"Assigned device {device['device_serial']} to patient {body.patient_id}"
     )
 
+    # AWS-SCALABLE VALIDATION: Clear the Valkey routing cache immediately so next packets hit DB properly
+    await invalidate_device_cache(device["device_serial"])
+
     if isinstance(updated.get("created_at"), str):
         updated["created_at"] = datetime.fromisoformat(updated["created_at"])
     updated["updated_at"] = now
@@ -1752,6 +1886,9 @@ async def unassign_device(device_id: str, request: Request):
         "unassigned", "device", device["device_serial"],
         f"Unassigned device {device['device_serial']} from patient"
     )
+
+    # AWS-SCALABLE VALIDATION: Clear the Valkey routing cache immediately so next packets hit DB properly
+    await invalidate_device_cache(device["device_serial"])
 
     if isinstance(updated.get("created_at"), str):
         updated["created_at"] = datetime.fromisoformat(updated["created_at"])
@@ -1849,8 +1986,166 @@ async def update_device_permissions(
     return {"message": "Device permissions updated"}
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# INGESTION GATEWAY DIRECT API
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class IngestionPayload(BaseModel):
+    device_serial: str
+    collection: str
+    payload: dict
+
+@api_router.post("/telemetry/ingest", status_code=202)
+async def ingest_telemetry(data: IngestionPayload):
+    """
+    Direct high-speed HTTP telemetry ingest endpoint.
+    Maintains clean flat format for real-time events.
+    """
+    if db is None or telemetry_db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+        
+    device = await db.devices.find_one(
+        {"device_serial": data.device_serial},
+        {"_id": 0, "assigned_patient_id": 1, "device_type": 1}
+    )
+    patient_id = device.get("assigned_patient_id") if device else None
+
+    data.payload["device_id"] = data.device_serial
+    server_ts = datetime.now(timezone.utc).isoformat()
+    data.payload["server_ts"] = server_ts
+
+    if patient_id:
+        event_payload = {
+            **data.payload,
+            "source": "live",
+            "device_type": device.get("device_type", "sleep_monitor")
+        }
+        event_payload.pop("_id", None)
+        await event_bus.publish(patient_id, event_payload)
+
+    # Cache payload flat representation directly to Valkey
+    if valkey_manager.client:
+        try:
+            event_type = data.payload.get("schema") or data.payload.get("event_type") or data.collection
+            await valkey_manager.client.setex(
+                f"telemetry:{event_type}:{data.device_serial}",
+                3600,
+                json.dumps(data.payload)
+            )
+        except Exception as e:
+            logger.warning(f"Failed to cache ingest payload to Valkey: {e}")
+
+    # Fire background database inserts to maintain zero blockages on incoming connections
+    collection_name = data.collection if data.collection in ["vitals", "sleep", "alerts"] else "vitals"
+    asyncio.create_task(telemetry_db[collection_name].insert_one(data.payload))
+
+    if patient_id:
+        asyncio.create_task(db.devices.update_one(
+            {"device_serial": data.device_serial},
+            {"$set": {"last_seen": server_ts, "updated_at": server_ts}}
+        ))
+
+    return {"status": "broadcasted" if patient_id else "queued"}
+
+
 # ══════════════════════════════════════════════════════════════════════════════
-# DASHBOARD & REST ENDPOINTS
+# WEBSOCKET STREAM HANDLERS (AUTHENTICATED - PATIENT ROOM BINDINGS)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@api_router.websocket("/ws")
+async def websocket_endpoint(
+    websocket: WebSocket,
+    token: Optional[str] = Query(default=None),
+    patient_id: Optional[str] = Query(default=None),
+):
+    """
+    WebSocket real-time telemetry pipeline.
+    Uses room isolation for patient scoping to avoid multi-device message leakages.
+    """
+    logger.info(f"WS connection attempt: patient_id={patient_id}")
+
+    if db is None:
+        await websocket.close(code=status.WS_1011_INTERNAL_ERROR, reason="Database unavailable")
+        return
+
+    await websocket.accept()
+
+    # ── Auth Phase ──
+    auth_token = token
+
+    if not auth_token:
+        try:
+            # Await auth packet from client within 5s frame
+            raw_msg = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
+            msg = json.loads(raw_msg)
+            if msg.get("type") == "auth":
+                auth_token = msg.get("token")
+            else:
+                await websocket.send_json({"type": "auth_fail", "reason": "Expected auth frame"})
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Expected auth frame")
+                return
+        except asyncio.TimeoutError:
+            await websocket.send_json({"type": "auth_fail", "reason": "Authentication timeout"})
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Auth timeout")
+            return
+        except Exception as e:
+            logger.warning(f"WS Auth Exception: {e}")
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Auth error")
+            return
+
+    if not auth_token:
+        await websocket.send_json({"type": "auth_fail", "reason": "Missing token"})
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Missing token")
+        return
+
+    session_doc = await db.user_sessions.find_one({"session_token": auth_token}, {"_id": 0})
+    if not session_doc:
+        await websocket.send_json({"type": "auth_fail", "reason": "Invalid token"})
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Invalid token")
+        return
+
+    expires_at = session_doc.get("expires_at")
+    if isinstance(expires_at, str):
+        expires_at = datetime.fromisoformat(expires_at)
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at < datetime.now(timezone.utc):
+        await websocket.send_json({"type": "auth_fail", "reason": "Token expired"})
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Token expired")
+        return
+
+    await websocket.send_json({"type": "auth_ok"})
+    target_patient_id = patient_id or session_doc.get("user_id")
+
+    # Connect client websocket room safely using the robust patient connection method
+    await manager.connect_patient(target_patient_id, websocket)
+
+    # DIRECT EVENT -> WS PUSH: Seed the workspace instantly with latest snapshots on mount
+    try:
+        initial_snapshot = await resolve_telemetry(target_patient_id)
+        await websocket.send_json(initial_snapshot)
+
+        # Heartbeat verification loop to protect backend thread allocations
+        while True:
+            # Blocks waiting for client frames (like ping or dashboard requests)
+            raw = await websocket.receive_text()
+            try:
+                msg = json.loads(raw)
+                if msg.get("type") == "ping":
+                    await websocket.send_json({"type": "pong"})
+            except json.JSONDecodeError:
+                pass
+
+    except WebSocketDisconnect:
+        logger.info(f"WS Client disconnected cleanly from patient room {target_patient_id}.")
+    except Exception as e:
+        logger.error(f"WS Exception in patient room {target_patient_id}: {e}")
+    finally:
+        manager.disconnect_patient(target_patient_id, websocket)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DASHBOARD & HTTP BOOTSTRAP ENDPOINTS
 # ══════════════════════════════════════════════════════════════════════════════
 
 @api_router.get("/")
@@ -1861,10 +2156,13 @@ async def root():
 async def get_dashboard(request: Request):
     """
     HTTP GET /api/dashboard endpoint populated 100% dynamically from the database.
-    No mock data models are generated. Resolves real-time patient status, vitals,
-    device info, and retrieves historical data dynamically.
+    Used for dashboard bootstrap, SSR hydration, and initial mount renders.
     """
     current_user = await get_current_user(request)
+    
+    # Resolve metrics from the multi-collection live IoT databases
+    # This automatically determines precise "is_online" metrics via Epoch age
+    telemetry = await resolve_telemetry(current_user.user_id)
     
     # Base patient profile mapping
     patient_info = Patient(
@@ -1872,7 +2170,7 @@ async def get_dashboard(request: Request):
         name=current_user.name,
         room="Room N/A",
         age=0,
-        status="Offline"
+        status="Online" if telemetry.get("is_online") else "Offline"
     )
     
     # Query database User profile to fetch room, age, and admission details
@@ -1880,11 +2178,11 @@ async def get_dashboard(request: Request):
     if user_doc:
         patient_info.room = user_doc.get("room") or "Room N/A"
         patient_info.age = user_doc.get("age") or 0
-        patient_info.status = user_doc.get("status") or "Offline"
+        # If user explicitly had a status like "Discharged", maintain it, else override with Telemetry network state
+        user_status = user_doc.get("status")
+        if user_status not in ["Admitted", "Online", "Offline"]:
+            patient_info.status = user_status or patient_info.status
 
-    # Resolve metrics from the multi-collection live IoT databases
-    telemetry = await resolve_telemetry(current_user.user_id)
-    
     # If no device assigned or data streams are fully unpopulated, output empty schema fallback
     if telemetry.get("source") == "empty":
         return DashboardData(
@@ -1908,7 +2206,7 @@ async def get_dashboard(request: Request):
             ),
             device_status=DeviceStatus(
                 radar_sensor="Disconnected",
-                signal="Weak",
+                signal="Offline",
                 battery=0
             ),
             alerts=[],
@@ -1937,15 +2235,17 @@ async def get_dashboard(request: Request):
         # OPTIMIZATION: Leverages compound index [device_id, epoch] to prevent in-memory sort blocking
         cursor = telemetry_db.vitals.find(
             {"device_id": device["device_serial"]},
-            projection={"_id": 0, "epoch": 1, "hr": 1, "br": 1}
+            projection={"_id": 0, "epoch": 1, "hr": 1, "br": 1, "payload": 1}
         ).sort("epoch", -1).limit(24)
         history_logs = await cursor.to_list(24)
         history_logs.reverse()
         for log in history_logs:
-            epoch = log.get("epoch") or 0
+            # Unwrap history document if enveloped
+            target_log = log["payload"] if "payload" in log else log
+            epoch = target_log.get("epoch") or log.get("epoch") or 0
             time_label = datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%H:%M")
-            hr_history.append({"time": time_label, "value": log.get("hr") or 0})
-            rr_history.append({"time": time_label, "value": log.get("br") or 0})
+            hr_history.append({"time": time_label, "value": target_log.get("hr") or 0})
+            rr_history.append({"time": time_label, "value": target_log.get("br") or target_log.get("rr") or 0})
     
     # Return genuine consolidated data payload mapped directly from database documents
     return DashboardData(
@@ -1953,8 +2253,8 @@ async def get_dashboard(request: Request):
         vitals=Vitals(
             heart_rate=telemetry.get("hr") or 0,
             heart_rate_status="Normal" if 60 <= (telemetry.get("hr") or 0) <= 90 else "Warning",
-            respiration_rate=telemetry.get("br") or 0,
-            respiration_status="Steady" if 12 <= (telemetry.get("br") or 0) <= 20 else "Warning",
+            respiration_rate=telemetry.get("br") or telemetry.get("rr") or 0,
+            respiration_status="Steady" if 12 <= (telemetry.get("br") or telemetry.get("rr") or 0) <= 20 else "Warning",
             sleep_status="Deep Sleep" if telemetry.get("sleeping") else "Awake",
             sleep_quality=telemetry.get("sleep_quality_label") or "Stable",
             fall_detected=telemetry.get("fl") or False,
@@ -1969,7 +2269,7 @@ async def get_dashboard(request: Request):
         ),
         device_status=DeviceStatus(
             radar_sensor="Connected",
-            signal="Strong" if telemetry.get("source") == "live" else "Good",
+            signal="Online" if telemetry.get("is_online") else "Offline",
             battery=int(telemetry.get("bb") or 100)
         ),
         alerts=[],
@@ -1978,8 +2278,8 @@ async def get_dashboard(request: Request):
             total_minutes=0,
             deep_sleep_hours=0.0,
             deep_sleep_minutes=0,
-            quality_percentage=int((telemetry.get("sleep_quality") or 0.0) * 100),
-            quality_label="Good" if (telemetry.get("sleep_quality") or 0.0) > 0.7 else "Fair"
+            quality_percentage=int((telemetry.get("sleep_quality") or telemetry.get("qq") or 0.0)),
+            quality_label="Good" if (telemetry.get("sleep_quality") or telemetry.get("qq") or 0.0) > 70.0 else "Fair"
         ),
         activity_level=ActivityLevel(
             movement="Low" if telemetry.get("sleeping") else "Moderate",
@@ -2026,8 +2326,6 @@ async def get_dashboard_stream(
 ):
     """
     Polling fallback: returns real telemetry from vitals_monitoring via resolve_telemetry().
-    source="live"  → real data.
-    source="empty" → no device assigned or no data yet.
     """
     current_user = await get_current_user(request)  # raises 401/403 if invalid
     # Patients always get their own data; privileged roles may specify a patient_id
@@ -2039,16 +2337,56 @@ async def get_dashboard_stream(
     return await resolve_telemetry(target_patient_id)
 
 
-# ─── Telemetry History Endpoint ───
+# ═════════════════════════════════════════════════════════════════════════
+# INFINITE REALTIME CHART HISTORY ENDPOINT (OPTIMIZED FOR ZERO-STATE & HISTORY)
+# ═════════════════════════════════════════════════════════════════════════
+
+WINDOW_MAP = {
+    "5m": 300,
+    "15m": 900,
+    "30m": 1800,
+    "1h": 3600,
+    "3h": 10800,
+    "6h": 21600,
+    "12h": 43200,
+    "24h": 86400
+}
+
+def normalize_telemetry_point(doc: dict) -> dict:
+    """Standardizes disparate hardware shortcodes into clean output formats including Zeros."""
+    iso_val = doc.get("iso_timestamp") or doc.get("iso")
+    if not iso_val and doc.get("ts"):
+        ts_val = doc["ts"]
+        if isinstance(ts_val, dict) and "$numberLong" in ts_val:
+            ts_val = int(ts_val["$numberLong"])
+        iso_val = datetime.fromtimestamp(ts_val / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    return {
+        "event_id": doc.get("event_id"),
+        "epoch": doc.get("epoch"),
+        "timestamp": iso_val or datetime.now(timezone.utc).isoformat(),
+        "iso_timestamp": iso_val,
+        "hr": doc.get("hr") or doc.get("heart_rate") or doc.get("pulse") or 0,
+        "spo2": doc.get("spo2") or doc.get("oxygen") or 0,
+        "br": doc.get("br") or doc.get("rr") or doc.get("resp_rate") or 0,
+        "temp": doc.get("temp") or doc.get("temperature") or 0,
+        "al": doc.get("al") or "OK",
+        "heartbeat_confidence": doc.get("heartbeat_confidence") or 0,
+        "breath_confidence": doc.get("breath_confidence") or 0,
+        "sleep_quality": doc.get("sleep_quality") or 0
+    }
+
 @api_router.get("/patients/{patient_id}/telemetry-history")
+@api_router.get("/patients/{patient_id}/chart-history")
 async def get_patient_telemetry_history(
     patient_id: str, 
     request: Request, 
-    limit: int = Query(default=200, le=1000)
+    limit: int = Query(default=200, le=1000),
+    window: Optional[str] = Query(default=None)
 ):
     """
     Fetches the historical telemetry logs for a patient's assigned device.
-    Utilized on dashboard mount to pre-populate charts with authentic historical records.
+    Supports Infinite Realtime Chart architecture mapping seamlessly backwards and forwards.
     """
     current_user = await get_current_user(request)
     # Check hospital scoping for non-superadmin users
@@ -2060,214 +2398,60 @@ async def get_patient_telemetry_history(
     # Resolve patient's assigned device
     device = await db.devices.find_one({"assigned_patient_id": patient_id})
     if not device:
-        return {"history": []}
+        # Ensures chart frontend mounts instantly with clean array even if device doesn't exist
+        return {"success": True, "count": 0, "history": []}
         
     device_serial = device["device_serial"]
+    query = {"device_id": device_serial}
+    current_epoch = int(datetime.now(timezone.utc).timestamp())
+
+    # OPTIMIZATION: Process Time Window Truncation (5m - 24h)
+    if window:
+        if window not in WINDOW_MAP:
+            return Response(
+                content=json.dumps({"success": False, "message": "Invalid window parameter"}), 
+                status_code=400, media_type="application/json"
+            )
+        cutoff_epoch = current_epoch - WINDOW_MAP[window]
+        query["epoch"] = {"$gte": cutoff_epoch}
+        limit = 5000  # Expand limits safely if fetching deep chronological windows
     
     # OPTIMIZATION: Uses compound index on [device_id, epoch] to avoid in-memory memory sorting
     cursor = telemetry_db.vitals.find(
-        {"device_id": device_serial},
-        projection={"_id": 0, "iso_timestamp": 1, "iso": 1, "ts": 1, "epoch": 1, "hr": 1, "br": 1, "spo2": 1, "heartbeat_confidence": 1, "breath_confidence": 1, "sleep_quality": 1}
+        query,
+        projection={"_id": 0, "event_id": 1, "iso_timestamp": 1, "iso": 1, "ts": 1, "epoch": 1, "hr": 1, "br": 1, "spo2": 1, "heartbeat_confidence": 1, "breath_confidence": 1, "sleep_quality": 1, "payload": 1}
     ).sort("epoch", -1).limit(limit)
     
     logs = await cursor.to_list(limit)
     
-    # Format and reverse list so records run chronologically (oldest to newest)
-    history = []
+    # Format, unwrap and reverse list so records run chronologically (oldest to newest) required for Charts
+    history_points = []
     for log in logs:
-        # Resolve timestamp safely
-        iso_val = log.get("iso_timestamp") or log.get("iso")
-        if not iso_val and log.get("ts"):
-            # Convert millisecond timestamp dictionary/value to string if needed
-            ts_val = log["ts"]
-            if isinstance(ts_val, dict) and "$numberLong" in ts_val:
-                ts_val = int(ts_val["$numberLong"])
-            iso_val = datetime.fromtimestamp(ts_val / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            
-        history.append({
-            "iso_timestamp": iso_val,
-            "epoch": log.get("epoch"),
-            "hr": log.get("hr"),
-            "br": log.get("br"),
-            "spo2": log.get("spo2"),
-            "heartbeat_confidence": log.get("heartbeat_confidence"),
-            "breath_confidence": log.get("breath_confidence"),
-            "sleep_quality": log.get("sleep_quality"),
-        })
+        # Resolve dynamic envelope unwrap
+        target_doc = log["payload"] if "payload" in log else log
+        if "epoch" not in target_doc and "epoch" in log:
+            target_point = {**target_doc, "epoch": log["epoch"], "event_id": log.get("event_id")}
+        else:
+            target_point = target_doc
+        history_points.append(normalize_telemetry_point(target_point))
         
-    history.reverse()
-    return {"history": history}
+    history_points.reverse()
+    
+    return {
+        "success": True,
+        "count": len(history_points),
+        "history": history_points
+    }
 
-
-# ─── WebSocket Endpoint (v2 — auth-frame protocol) ────────────────────────────
-
-@api_router.websocket("/ws")
-async def websocket_endpoint(
-    websocket: WebSocket,
-    token: Optional[str] = Query(default=None),
-    patient_id: Optional[str] = Query(default=None),
-):
-    """
-    WebSocket real-time telemetry stream.
-    Supports legacy and token-based frame authentication, with sub-millisecond reactive pushes.
-    """
-    logger.info(f"WS handshake: patient_id={patient_id}")
-
-    if db is None:
-        logger.error("WS rejected: database unavailable")
-        await websocket.close(code=4003, reason="Database unavailable")
-        return
-
-    await websocket.accept()
-
-    # ── Auth phase ──
-    auth_token = token
-
-    if not auth_token:
-        try:
-            raw_msg = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
-            msg = json.loads(raw_msg)
-            if msg.get("type") == "auth":
-                auth_token = msg.get("token")
-            else:
-                await websocket.send_json({"type": "auth_fail", "reason": "Expected auth frame"})
-                await websocket.close(code=4001, reason="Expected auth frame")
-                return
-        except asyncio.TimeoutError:
-            logger.warning("WS rejected: auth timeout")
-            await websocket.send_json({"type": "auth_fail", "reason": "Auth timeout"})
-            await websocket.close(code=4001, reason="Auth timeout")
-            return
-        except Exception as e:
-            logger.warning(f"WS auth error: {e}")
-            await websocket.close(code=4001, reason="Auth error")
-            return
-
-    if not auth_token:
-        logger.warning("WS rejected: missing token")
-        await websocket.send_json({"type": "auth_fail", "reason": "Missing token"})
-        await websocket.close(code=4001, reason="Missing auth token")
-        return
-
-    session_doc = await db.user_sessions.find_one({"session_token": auth_token}, {"_id": 0})
-    if not session_doc:
-        logger.warning("WS rejected: invalid token")
-        await websocket.send_json({"type": "auth_fail", "reason": "Invalid token"})
-        await websocket.close(code=4001, reason="Invalid token")
-        return
-
-    expires_at = session_doc.get("expires_at")
-    if isinstance(expires_at, str):
-        expires_at = datetime.fromisoformat(expires_at)
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    if expires_at < datetime.now(timezone.utc):
-        logger.warning("WS rejected: token expired")
-        await websocket.send_json({"type": "auth_fail", "reason": "Token expired"})
-        await websocket.close(code=4001, reason="Token expired")
-        return
-
-    await websocket.send_json({"type": "auth_ok"})
-    logger.info(f"WS auth_ok for user_id={session_doc.get('user_id')} patient_id={patient_id}")
-
-    target_patient_id = patient_id or session_doc.get("user_id")
-
-    manager.active_connections.append(websocket)
-
-    try:
-        # Push initial snapshot instantly
-        initial_doc = await resolve_telemetry(target_patient_id)
-        await websocket.send_json(initial_doc)
-
-        # OPTIMIZATION: Sub-millisecond Reactive Change Stream with fallback polling.
-        # This listens to DB inserts natively and streams live packets instantly without delay.
-        # Implemented a dynamic self-healing loop that re-evaluates the assigned device serial on the fly.
-        async def stream_telemetry_pipeline():
-            current_serial = None
-            
-            while True:
-                # Resolve current device assignment
-                device_doc = await db.devices.find_one({"assigned_patient_id": target_patient_id}, {"device_serial": 1, "_id": 0})
-                resolved_serial = device_doc["device_serial"] if device_doc else None
-                
-                if resolved_serial != current_serial:
-                    current_serial = resolved_serial
-                    logger.info(f"WS Device serial updated/resolved: {current_serial} for patient {target_patient_id}")
-                    # Push updated telemetry immediately
-                    doc = await resolve_telemetry(target_patient_id)
-                    await websocket.send_json(doc)
-                
-                if not current_serial or telemetry_db is None:
-                    # No device assigned, wait 5 seconds and check again
-                    await asyncio.sleep(5.0)
-                    continue
-                    
-                try:
-                    # Watch all collections (vitals, sleep, alerts) inside telemetry_db concurrently
-                    change_filter = {
-                        "operationType": {"$in": ["insert", "update", "replace"]},
-                        "fullDocument.device_id": current_serial
-                    }
-                    
-                    # Single database-level watcher is highly optimized and captures sleep, vitals and alerts concurrently
-                    async with telemetry_db.watch([{"$match": change_filter}], full_document="updateLookup") as stream:
-                        # Periodically timeout to re-check if the device assignment was updated on the main app database
-                        while True:
-                            try:
-                                change_on_stream = await asyncio.wait_for(stream.next(), timeout=10.0)
-                                doc = await resolve_telemetry(target_patient_id)
-                                await websocket.send_json(doc)
-                            except asyncio.TimeoutError:
-                                # Break inner loop to re-resolve device serial in case it was unassigned or swapped
-                                break
-                except Exception as e:
-                    logger.info(f"WS Change Stream bypassed/unsupported. Falling back to high-frequency polling. Reason: {e}")
-                    # Fallback to lightning fast 1s polling if MongoDB host does not support Change Streams (e.g. standalone local dbs)
-                    while True:
-                        device_check = await db.devices.find_one({"assigned_patient_id": target_patient_id}, {"device_serial": 1, "_id": 0})
-                        check_serial = device_check["device_serial"] if device_check else None
-                        if check_serial != current_serial:
-                            break  # Assignment changed, break to re-evaluate serial
-                        
-                        doc = await resolve_telemetry(target_patient_id)
-                        await websocket.send_json(doc)
-                        # Poll every 1 second (instead of 3-10s) for rapid display sync while preserving CPU overhead
-                        await asyncio.sleep(1.0)
-
-        stream_task = asyncio.create_task(stream_telemetry_pipeline())
-
-        try:
-            while True:
-                raw = await websocket.receive_text()
-                try:
-                    msg = json.loads(raw)
-                    if msg.get("type") == "ping":
-                        await websocket.send_json({"type": "pong"})
-                except json.JSONDecodeError:
-                    pass
-        except WebSocketDisconnect:
-            pass
-        finally:
-            stream_task.cancel()
-
-    except WebSocketDisconnect:
-        logger.info(f"WS: client disconnected (patient_id={patient_id})")
-    except Exception as e:
-        logger.error(f"WS stream error: {e}")
-    finally:
-        manager.disconnect(websocket)
-        logger.info(f"WS: cleaned up (patient_id={patient_id})")
-
-
-# ═════════════════════════════════════════════════════════════════════════
-# MIDDLEWARE & STARTUP
-# ═════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# LIFECYCLE BACKGROUND LOOPS AND SHUTDOWN LOGIC
+# ══════════════════════════════════════════════════════════════════════════════
 
 _ALWAYS_ALLOWED: list[str] = [
     "https://sleep-monitoring-frontend.vercel.app",
-    # "http://localhost:3000",
-    # "http://localhost:5173",
-    # "http://localhost:8001",
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://localhost:8001",
 ]
 
 _env_origins_raw = os.environ.get("CORS_ORIGINS", "")
@@ -2292,6 +2476,152 @@ app.add_middleware(
 )
 
 app.include_router(api_router)
+
+
+async def valkey_telemetry_subscriber():
+    """
+    AWS-SCALABLE: Uses an isolated Valkey client for Pub/Sub wire listening, 
+    and the global valkey_manager.client for ultra-fast distributed caching.
+    Includes memory caching for `/dashboard` hydration and robust retry-sentinel looping.
+    """
+    logger.info("Starting Valkey Telemetry Subscriber...")
+    channel = os.environ.get("VALKEY_CHANNEL", "hospital.telemetry.events")
+    
+    valkey_kwargs = {
+        "host": os.environ.get("VALKEY_HOST", "localhost"),
+        "port": int(os.environ.get("VALKEY_PORT", 6379)),
+        "decode_responses": True,
+        "health_check_interval": 30,
+        "retry_on_timeout": True
+    }
+    
+    # Secure Password Checking: Bypasses blank/null AUTH attempts
+    raw_pwd = os.environ.get("VALKEY_PASSWORD")
+    if raw_pwd and isinstance(raw_pwd, str):
+        clean_pwd = raw_pwd.strip()
+        if clean_pwd and clean_pwd.lower() not in ["none", "null"]:
+            valkey_kwargs["password"] = clean_pwd
+            
+    while True:
+        pubsub_client = None
+        try:
+            pubsub_client = valkey.Valkey(**valkey_kwargs)
+            pubsub = pubsub_client.pubsub()
+            await pubsub.subscribe(channel)
+            
+            logger.info(f"Successfully subscribed to Valkey channel: {channel}")
+            
+            async for message in pubsub.listen():
+                if message["type"] == "message":
+                    try:
+                        payload = json.loads(message["data"])
+                        
+                        # ──────────────────────────────────────────────────────────
+                        # CRITICAL DEPENDENCY: DYNAMIC IN-MEMORY TELEMETRY UNWRAPPING
+                        # If this message is wrapped in an event envelope, extract the flat inner payload
+                        # immediately so React elements do not experience key dropouts.
+                        # ──────────────────────────────────────────────────────────
+                        is_enveloped = "payload" in payload and "event_type" in payload
+                        if is_enveloped:
+                            envelope = payload
+                            payload = envelope["payload"]
+                            
+                            # Preserve essential event descriptors and routing parameters
+                            payload["event_type"] = envelope.get("event_type")
+                            payload["timestamp"] = envelope.get("timestamp")
+                            
+                            # CRITICAL LOGIC CORRECTION: Device Serial matches our primary database mappings.
+                            # Ensure we prioritize the true hardware MAC (e.g. BM-...) from the inner payload
+                            inner_id = payload.get("device_id") or payload.get("did")
+                            outer_id = envelope.get("device_id")
+                            
+                            if inner_id and "esp" not in str(inner_id).lower():
+                                device_serial = inner_id
+                            elif outer_id and "esp" not in str(outer_id).lower():
+                                device_serial = outer_id
+                            else:
+                                device_serial = inner_id or outer_id
+                                
+                            payload["device_id"] = device_serial
+                        else:
+                            device_serial = payload.get("device_id") or payload.get("did")
+                        
+                        if not device_serial:
+                            continue
+                            
+                        # ─── OPTIMIZATION: DYNAMIC RAM CACHE FOR DASHBOARD/CHART HYDRATION ───
+                        # Instantly stores flat parsed telemetry representation inside Valkey RAM
+                        event_type = payload.get("schema") or payload.get("event_type") or "vitals"
+                        if valkey_manager.client:
+                            try:
+                                await valkey_manager.client.setex(
+                                    f"telemetry:{event_type}:{device_serial}", 
+                                    3600, # Cache TTL ensures history endpoints fetch real status dynamically
+                                    json.dumps(payload)
+                                )
+                            except Exception as ce:
+                                logger.debug(f"Failed to cache payload in Valkey RAM: {ce}")
+                            
+                        # ─── ENTERPRISE DISTRIBUTED CACHE LOOKUP ───
+                        cache_key = f"route:{device_serial}"
+                        routing_info = None
+                        
+                        # 1. Ask Valkey Global Client for the routing map (Ultra-fast, shared across AWS)
+                        if valkey_manager.client:
+                            cached_route_str = await valkey_manager.client.get(cache_key)
+                            if cached_route_str:
+                                routing_info = json.loads(cached_route_str)
+                        
+                        # 2. Cache Miss: Query MongoDB ONCE using the resolved true unique hardware serial
+                        if not routing_info:
+                            device_doc = await db.devices.find_one(
+                                {"device_serial": device_serial}, 
+                                {"assigned_patient_id": 1, "device_type": 1}
+                            )
+                            
+                            if device_doc and device_doc.get("assigned_patient_id"):
+                                routing_info = {
+                                    "patient_id": device_doc["assigned_patient_id"],
+                                    "device_type": device_doc.get("device_type", "sleep_monitor")
+                                }
+                                # 3. Save to Valkey with a Time-To-Live (TTL) of 24 hours
+                                if valkey_manager.client:
+                                    await valkey_manager.client.set(
+                                        cache_key, 
+                                        json.dumps(routing_info), 
+                                        ex=86400 
+                                    )
+                        
+                        # 4. Route instantly to WebSocket memory
+                        if routing_info:
+                            patient_id = routing_info["patient_id"]
+                            
+                            # Fetch the completely normalized, mapped, and epoch-injected state
+                            resolved_payload = await resolve_telemetry(patient_id)
+                            
+                            # Publish the fully integrated UI-ready document instead of the raw MQTT tuple
+                            await event_bus.publish(patient_id, resolved_payload)
+                    except Exception as e:
+                        logger.error(f"Error processing Valkey message payload: {e}")
+                        
+        except TimeoutError:
+            # Idle channels trigger timeout in python drivers. Loop back to prevent listener death.
+            logger.debug("Valkey subscription channel idle. Resuming...")
+            await asyncio.sleep(0.5)
+            continue
+        except asyncio.CancelledError:
+            logger.info("Valkey subscriber task cancelled cleanly.")
+            break
+        except Exception as e:
+            logger.error(f"Valkey Subscriber Connection Interrupted. Retrying in 5s... {e}")
+            await asyncio.sleep(5)
+        finally:
+            if pubsub_client:
+                try:
+                    await pubsub_client.aclose()
+                except Exception:
+                    pass
+
 
 @app.on_event("startup")
 async def create_indexes():
@@ -2318,7 +2648,7 @@ async def create_indexes():
             await telemetry_db.sleep.create_index([("device_id", 1), ("ts", -1)])
             await telemetry_db.alerts.create_index([("device_id", 1), ("ts", -1)])
             
-            # OPTIMIZATION: Compound index to completely eliminate in-memory sort blocking on history queries
+            # OPTIMIZATION: Compound index to completely eliminate in-memory memory sorting on history queries
             await telemetry_db.vitals.create_index([("device_id", 1), ("epoch", -1)])
             await telemetry_db.sleep.create_index([("device_id", 1), ("epoch", -1)])
             await telemetry_db.alerts.create_index([("device_id", 1), ("epoch", -1)])
@@ -2333,8 +2663,35 @@ async def start_background_tasks():
     if db is None:
         logger.warning("start_background_tasks: db not ready, skipping")
         return
-    asyncio.create_task(sync_last_seen())
-    logger.info("sync_last_seen background task started")
+        
+    try:
+        # Initialize the global Valkey Client pool for fast operations and distributed caching
+        if not valkey_manager.client:
+            valkey_kwargs = {
+                "host": os.environ.get("VALKEY_HOST", "localhost"),
+                "port": int(os.environ.get("VALKEY_PORT", 6379)),
+                "decode_responses": True,
+                "health_check_interval": 30,
+                "retry_on_timeout": True
+            }
+            # Secure Password Checking: Bypasses blank/null AUTH attempts
+            raw_pwd = os.environ.get("VALKEY_PASSWORD")
+            if raw_pwd and isinstance(raw_pwd, str):
+                clean_pwd = raw_pwd.strip()
+                if clean_pwd and clean_pwd.lower() not in ["none", "null"]:
+                    valkey_kwargs["password"] = clean_pwd
+                    
+            valkey_manager.client = valkey.Valkey(**valkey_kwargs)
+        
+        asyncio.create_task(sync_last_seen())
+        logger.info("sync_last_seen background task started")
+
+        # Start the AWS-scalable Valkey Subscriber Background Task
+        asyncio.create_task(valkey_telemetry_subscriber())
+        logger.info("Valkey Telemetry Subscriber background task started successfully.")
+
+    except Exception as e:
+        logger.error(f"Error starting background tasks: {e}")
 
 
 @app.on_event("shutdown")
