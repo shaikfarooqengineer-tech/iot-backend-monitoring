@@ -24,9 +24,8 @@ class Settings(BaseSettings):
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
     
     # MongoDB Configuration
-    mongo_uri: str = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
+    mongo_uri: str = os.getenv("MONGO_URI", "")
     mongo_db_name: str = os.getenv("MONGO_DB_NAME", "vitals_monitoring")
-    
     # Valkey / Redis Configuration
     valkey_host: str = os.getenv("VALKEY_HOST", "localhost")
     valkey_port: int = int(os.getenv("VALKEY_PORT", 6379))
