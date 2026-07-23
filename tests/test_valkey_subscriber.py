@@ -1,10 +1,8 @@
-<<<<<<< HEAD
 #  ══════════════════════════════════════════════════════════════════════════════
 # FILE: backend/app/tests/test_valkey_subscriber.py
 #  ══════════════════════════════════════════════════════════════════════════════
 
-=======
->>>>>>> cd28364c17ac2aaabbb6853365379f34badc6f4e
+
 import asyncio
 import json
 import valkey.asyncio as valkey
@@ -34,7 +32,7 @@ async def main():
                 data = json.loads(message['data'])
                 event_type = data.get("event_type", "unknown").upper()
                 device_id = data.get("device_id")
-                payload = data.get("payload", {})
+                payload = data
                 
                 print(f"\n--- [EVENT DISPATCHED: {event_type}] ---")
                 print(f"Device: {device_id} | Timestamp: {data.get('timestamp')}")

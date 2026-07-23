@@ -1,10 +1,7 @@
-<<<<<<< HEAD
 #  ══════════════════════════════════════════════════════════════════════════════
 # FILE: backend/app/db/mongo.py
 #  ══════════════════════════════════════════════════════════════════════════════
 
-=======
->>>>>>> cd28364c17ac2aaabbb6853365379f34badc6f4e
 import asyncio
 from typing import Optional
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase

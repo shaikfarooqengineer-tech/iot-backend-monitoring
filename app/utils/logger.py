@@ -4,10 +4,7 @@
 
 import logging
 import sys
-<<<<<<< HEAD
 from app.config import settings
-=======
->>>>>>> cd28364c17ac2aaabbb6853365379f34badc6f4e
 
 def setup_logger() -> logging.Logger:
     """
@@ -15,7 +12,6 @@ def setup_logger() -> logging.Logger:
     to standard output (terminal console), completely safe from Uvicorn's stream hijacking.
     """
     logger = logging.getLogger("hospital_backend")
-<<<<<<< HEAD
     
     # CRITICAL: Under Uvicorn hot-reload (--reload), sys.stdout is redirected/replaced.
     # We must clear existing stale handlers to force-bind a new StreamHandler to the active stdout stream.
@@ -49,7 +45,7 @@ def setup_logger() -> logging.Logger:
     return logger
 
 # Initialize the global logger instance
-=======
+
     logger.setLevel(logging.INFO)
     
     formatter = logging.Formatter(
@@ -65,5 +61,4 @@ def setup_logger() -> logging.Logger:
         
     return logger
 
->>>>>>> cd28364c17ac2aaabbb6853365379f34badc6f4e
 logger = setup_logger()

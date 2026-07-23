@@ -5,6 +5,7 @@ import asyncio
 import json
 import socket
 from typing import Any, Optional
+# pyrefly: ignore [missing-import]
 from gmqtt import Client as MQTTClient
 from app.config import settings
 from app.services.ingest_service import ingestion_queue
@@ -17,10 +18,7 @@ class MQTTConsumer:
         self.connected = False
         self._retry_task: Optional[asyncio.Task] = None
         self._stop_event = asyncio.Event()
-<<<<<<< HEAD
         self._reconnect_running = False
-=======
->>>>>>> cd28364c17ac2aaabbb6853365379f34badc6f4e
 
     def on_connect(self, client, flags, rc, properties):
         self.connected = True
@@ -39,12 +37,8 @@ class MQTTConsumer:
         try:
             raw_data = json.loads(payload.decode('utf-8'))
             if not ingestion_queue.full():
-<<<<<<< HEAD
                 # FIXED: Aligned key name to "payload" to match WriterService contract expectations
                 ingestion_queue.put_nowait({"topic": topic, "payload": raw_data})
-=======
-                ingestion_queue.put_nowait({"topic": topic, "data": raw_data})
->>>>>>> cd28364c17ac2aaabbb6853365379f34badc6f4e
             else:
                 logger.error(f"In-memory queue is full ({settings.queue_max_size} packets). Dropping payload from topic: {topic}")
         except Exception as e:
@@ -55,17 +49,12 @@ class MQTTConsumer:
             self._retry_task = asyncio.create_task(self._reconnect_loop())
 
     async def _reconnect_loop(self):
-<<<<<<< HEAD
         if self._reconnect_running:
             return
         self._reconnect_running = True
         
         retries = 0
         base_delay = 3.0
-=======
-        retries = 0
-        base_delay = 1.0
->>>>>>> cd28364c17ac2aaabbb6853365379f34badc6f4e
         max_delay = 60.0
         
         # Configure TLS if enabled
@@ -74,7 +63,6 @@ class MQTTConsumer:
             import ssl
             connect_kwargs["ssl"] = ssl.create_default_context()
             
-<<<<<<< HEAD
         # Warn the user once that telemetry logging is entering a "staled" state
         logger.warning("MQTT is NOT connected. Staling connection logs to avoid terminal flooding.")
         
@@ -99,27 +87,11 @@ class MQTTConsumer:
                 except socket.gaierror as dns_err:
                     if should_log_info:
                         logger.error(f"DNS lookup/resolution failed for host '{settings.mqtt_host}': {dns_err}")
-=======
-        while not self.connected and not self._stop_event.is_set():
-            retries += 1
-            delay = min(base_delay * (2 ** (retries - 1)), max_delay)
-            logger.info(f"Connecting to MQTT Broker at {settings.mqtt_host}:{settings.mqtt_port} (attempt {retries})...")
-            try:
-                # Perform DNS check (host lookup) to log explicit gaierrors before connect
-                try:
-                    socket.gethostbyname(settings.mqtt_host)
-                except socket.gaierror as dns_err:
-                    logger.error(f"DNS lookup/resolution failed for host '{settings.mqtt_host}': {dns_err}")
->>>>>>> cd28364c17ac2aaabbb6853365379f34badc6f4e
                     raise dns_err
 
                 await self.client.connect(settings.mqtt_host, settings.mqtt_port, **connect_kwargs)
                 
-<<<<<<< HEAD
                 # gmqtt connect is async. Monitor self.connected state changes
-=======
-                # gmqtt connect is async. Wait for connection status to update to True
->>>>>>> cd28364c17ac2aaabbb6853365379f34badc6f4e
                 for _ in range(50):
                     if self.connected or self._stop_event.is_set():
                         break
@@ -127,7 +99,6 @@ class MQTTConsumer:
                 
                 if self.connected:
                     logger.info(f"MQTT connection successfully established on attempt {retries}.")
-<<<<<<< HEAD
                     self._reconnect_running = False
                     return
                 else:
@@ -142,14 +113,6 @@ class MQTTConsumer:
                 await asyncio.sleep(delay)
                 
         self._reconnect_running = False
-=======
-                    return
-                else:
-                    raise ConnectionError("Handshake not completed within 5.0 seconds.")
-            except (socket.gaierror, ConnectionRefusedError, OSError, Exception) as e:
-                logger.error(f"MQTT connection attempt {retries} failed: {e}. Retrying in {delay:.1f}s...")
-                await asyncio.sleep(delay)
->>>>>>> cd28364c17ac2aaabbb6853365379f34badc6f4e
 
     async def start(self):
         """Establish the client connection and bind callback triggers."""
@@ -163,11 +126,7 @@ class MQTTConsumer:
         if getattr(settings, "mqtt_username", None) and getattr(settings, "mqtt_password", None):
             self.client.set_auth_credentials(settings.mqtt_username, settings.mqtt_password)
             
-<<<<<<< HEAD
         logger.info("Validating MQTT configurations:")
-=======
-        logger.info(f"Validating MQTT configurations:")
->>>>>>> cd28364c17ac2aaabbb6853365379f34badc6f4e
         logger.info(f"  MQTT_HOST: {settings.mqtt_host}")
         logger.info(f"  MQTT_PORT: {settings.mqtt_port}")
         logger.info(f"  MQTT_TOPIC: {settings.mqtt_topic}")
