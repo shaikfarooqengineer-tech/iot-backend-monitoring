@@ -1,8 +1,7 @@
 #  ══════════════════════════════════════════════════════════════════════════════
 # FILE: backend/app/config.py
 #  ══════════════════════════════════════════════════════════════════════════════
-
-from __future__ import annotations
+from typing import Optional
 from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
 import os
@@ -14,8 +13,8 @@ class Settings(BaseSettings):
     mqtt_host: str = os.getenv("MQTT_HOST", "a2f21c1405bc437b9508ec02e6bd8aa0.s1.eu.hivemq.cloud")
     mqtt_port: int = int(os.getenv("MQTT_PORT", 8883))
     mqtt_topic: str = os.getenv("MQTT_TOPIC", "test/olt/esp32/#")
-    mqtt_username: str | None = os.getenv("MQTT_USERNAME", "olt_sleep")
-    mqtt_password: str | None = os.getenv("MQTT_PASSWORD", "Olt@1234")
+    mqtt_username: Optional[str] = os.getenv("MQTT_USERNAME", "olt_sleep")
+    mqtt_password: Optional[str] = os.getenv("MQTT_PASSWORD", "Olt@1234")
     mqtt_use_tls: bool = os.getenv("MQTT_USE_TLS", "true").lower() == "true"
     
     # Local Queue Configuration
