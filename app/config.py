@@ -30,6 +30,6 @@ class Settings(BaseSettings):
     valkey_host: str = os.getenv("VALKEY_HOST", "localhost")
     valkey_port: int = int(os.getenv("VALKEY_PORT", 6379))
     valkey_channel: str = os.getenv("VALKEY_CHANNEL", "hospital.telemetry.events")
-    valkey_password: str | None = os.getenv("VALKEY_PASSWORD", "25fac5c6f53ce29324bf08855d335a61c204754436a4511843785987d6bc6279")
+    valkey_password: Optional[str] = os.getenv("VALKEY_PASSWORD", "25fac5c6f53ce29324bf08855d335a61c204754436a4511843785987d6bc6279")
 
 settings = Settings()
