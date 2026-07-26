@@ -2,6 +2,7 @@
 # FILE: backend/app/config.py
 #  ══════════════════════════════════════════════════════════════════════════════
 
+from __future__ import annotations
 from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
 import os
